@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+:root {
+  --brand: #ffe600;
+  --brand-ink: #1a1a1a;
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --text: #1e2430;
+  --text-secondary: #5b6472;
+  --text-muted: #9aa3b2;
+  --border: #e4e8ee;
+  --success: #16a34a;
+  --danger: #dc2626;
+  --warn: #b45309;
+  --accent: #2563eb;
+  --font: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  width: 340px;
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* 头部 */
+.head {
+  background: var(--brand);
+  color: var(--brand-ink);
+  padding: 14px 16px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.head-brand { display: flex; align-items: center; gap: 10px; }
+.head-logo {
+  width: 32px; height: 32px;
+  display: grid; place-items: center;
+  background: rgba(0,0,0,.08); border-radius: 8px;
+}
+.head b { font-size: 14px; display: block; line-height: 1.3; }
+.head small { font-size: 11px; opacity: .65; }
+
+/* 开关 */
+.switch { position: relative; width: 44px; height: 24px; flex: none; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider {
+  position: absolute; inset: 0;
+  background: rgba(0,0,0,.2); border-radius: 12px;
+  cursor: pointer; transition: background .2s ease;
+}
+.slider::before {
+  content: ""; position: absolute; width: 18px; height: 18px;
+  left: 3px; top: 3px;
+  background: #fff; border-radius: 50%;
+  box-shadow: 0 1px 2px rgba(0,0,0,.2);
+  transition: transform .2s ease;
+}
+input:checked + .slider { background: var(--success); }
+input:checked + .slider::before { transform: translateX(20px); }
+input:focus-visible + .slider { outline: 2px solid var(--brand-ink); outline-offset: 2px; }
+
+/* 统计 */
+.stats {
+  display: flex;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.stats > div {
+  flex: 1; text-align: center; padding: 12px 4px;
+}
+.stats > div + div { border-left: 1px solid var(--border); }
+.stats b { display: block; font-size: 20px; font-weight: 700; line-height: 1.2; }
+.stats span { color: var(--text-muted); font-size: 11px; }
+
+/* 日志 */
+.logs-wrap { background: var(--surface); }
+.logs-title {
+  padding: 10px 16px 4px;
+  font-size: 11px; font-weight: 600; color: var(--text-muted);
+  letter-spacing: .05em;
+}
+.logs { max-height: 230px; overflow-y: auto; padding: 4px 16px 8px; }
+.log {
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--border);
+  color: var(--text-secondary);
+  word-break: break-all;
+  font-size: 12px; line-height: 1.5;
+}
+.log:last-child { border-bottom: none; }
+.log .t {
+  color: var(--text-muted); margin-right: 6px;
+  font-size: 11px; font-variant-numeric: tabular-nums;
+}
+.log.error { color: var(--danger); }
+.log.warn { color: var(--warn); }
+.empty { color: var(--text-muted); text-align: center; padding: 24px 0; }
+
+/* 底部 */
+.foot {
+  padding: 10px 16px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.foot a {
+  color: var(--accent); text-decoration: none; cursor: pointer;
+  font-size: 12px; padding: 4px 6px; border-radius: 6px;
+  display: inline-flex; align-items: center; gap: 5px;
+  transition: background .15s ease;
+}
+.foot a:hover { background: var(--bg); }
+.foot a.quiet { color: var(--text-muted); }
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="head-brand">
+      <span class="head-logo">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 12c.94-3.46 4.94-6 8.5-6 3.56 0 6.06 2.54 7 6-.94 3.47-3.44 6-7 6s-7.56-2.53-8.5-6Z"/><path d="M18 12v.5"/><path d="M16 17.93a9.77 9.77 0 0 1 0-11.86"/><path d="M7 10.67C7 8 5.58 5.97 2.73 5.5c-1 1.5-1 5 .23 6.5-1.24 1.5-1.24 5-.23 6.5C5.58 18.03 7 16 7 13.33"/></svg>
+      </span>
+      <div>
+        <b>闲鱼智能客服</b>
+        <small>自动回复 · 自动发货</small>
+      </div>
+    </div>
+    <label class="switch" title="总开关">
+      <input type="checkbox" id="enabled">
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="stats">
+    <div><b id="stReplies">0</b><span>自动回复</span></div>
+    <div><b id="stDeliveries">0</b><span>自动发货</span></div>
+    <div><b id="stAi">0</b><span>AI 调用</span></div>
+  </div>
+
+  <div class="logs-wrap">
+    <div class="logs-title">运行日志</div>
+    <div class="logs" id="logs"><div class="empty">暂无日志</div></div>
+  </div>
+
+  <div class="foot">
+    <a id="openOptions">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+      打开设置
+    </a>
+    <a id="clearLogs" class="quiet">清空日志</a>
+  </div>
+<script src="popup.js"></script>
+</body>
+</html>

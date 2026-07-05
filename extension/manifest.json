@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "闲鱼智能客服助手",
+  "version": "0.1.0",
+  "description": "闲鱼网页版自动回复 + AI 智能客服 + 付款后自动发货（知识库驱动）",
+  "permissions": ["storage", "alarms", "notifications", "tabs", "scripting"],
+  "host_permissions": [
+    "https://www.goofish.com/*",
+    "https://api.openai.com/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://seller.goofish.com/*", "https://www.goofish.com/im*"],
+      "js": ["content/bridge.js"],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://seller.goofish.com/*", "https://www.goofish.com/im*"],
+      "js": ["backend-client.js", "content/selectors.js", "content/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "闲鱼智能客服助手"
+  },
+  "options_page": "options/options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

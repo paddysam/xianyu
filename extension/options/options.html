@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>闲鱼智能客服助手 - 设置</title>
+<link rel="stylesheet" href="options.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-logo">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 12c.94-3.46 4.94-6 8.5-6 3.56 0 6.06 2.54 7 6-.94 3.47-3.44 6-7 6s-7.56-2.53-8.5-6Z"/><path d="M18 12v.5"/><path d="M16 17.93a9.77 9.77 0 0 1 0-11.86"/><path d="M7 10.67C7 8 5.58 5.97 2.73 5.5c-1 1.5-1 5 .23 6.5-1.24 1.5-1.24 5-.23 6.5C5.58 18.03 7 16 7 13.33"/></svg>
+      </span>
+      <div>
+        <h1>闲鱼智能客服助手</h1>
+        <p>自动回复 · 知识库 · 自动发货</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="saveResult" role="status"></span>
+      <button id="save" class="btn primary">保存全部设置</button>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+
+  <nav class="sidenav" aria-label="设置分类">
+    <button class="tab active" data-tab="api">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
+      AI 接口
+    </button>
+    <button class="tab" data-tab="kb">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg>
+      知识库
+    </button>
+    <button class="tab" data-tab="products">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
+      商品发货
+    </button>
+    <button class="tab" data-tab="stock">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="4" x="8" y="2" rx="1"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>
+      库存总览
+    </button>
+    <button class="tab" data-tab="behavior">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
+      行为设置
+    </button>
+    <button class="tab" data-tab="advanced">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+      高级
+    </button>
+  </nav>
+
+  <main class="content">
+
+    <!-- AI 接口 -->
+    <section id="tab-api" class="panel active">
+      <div class="card">
+        <div class="card-head">
+          <h2>AI 接口配置</h2>
+          <p>OpenAI 兼容接口，支持官方 API 或任意中转服务</p>
+        </div>
+        <label>接口地址
+          <input id="apiBaseUrl" placeholder="https://api.openai.com/v1">
+        </label>
+        <label>API Key
+          <input id="apiKey" type="password" placeholder="sk-..." autocomplete="off">
+        </label>
+        <div class="row">
+          <label>模型
+            <input id="model" placeholder="gpt-4o-mini">
+          </label>
+          <label>温度
+            <input id="temperature" type="number" step="0.1" min="0" max="2">
+          </label>
+          <label>最大 tokens
+            <input id="maxTokens" type="number" min="50" max="2000">
+          </label>
+        </div>
+        <label>系统提示词（客服人设）
+          <textarea id="systemPrompt" rows="5"></textarea>
+        </label>
+        <label class="check">
+          <input id="aiEnabled" type="checkbox">
+          <span class="toggle" aria-hidden="true"></span>
+          知识库未命中时调用 AI 回复
+        </label>
+        <label class="check">
+          <input id="learnHumanStyle" type="checkbox">
+          <span class="toggle" aria-hidden="true"></span>
+          学习我的回复风格（记录你的手动回复当范本，让 AI 越答越像你；账号密码/卡密/邮箱等敏感内容自动不记录）
+        </label>
+        <label>喂给 AI 的风格范本条数（建议 30~50；已自动去重，相同回复只算一条。设大越像你但越费 token/略慢）
+          <input id="styleSampleCount" type="number" min="0" max="200">
+        </label>
+        <div class="inline-actions">
+          <button id="testApi" class="btn secondary">测试接口连通性</button>
+          <span id="testResult" role="status"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 知识库 -->
+    <section id="tab-kb" class="panel">
+      <div class="card">
+        <div class="card-head">
+          <h2>关键词直答</h2>
+          <p>命中直接回复，不走 AI，省钱且快。关键词用逗号分隔，买家消息包含任意一个即命中，从上到下优先匹配。</p>
+        </div>
+        <div id="kbList" class="entry-list"></div>
+        <button id="addKb" class="btn secondary add-btn">＋ 添加规则</button>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2>店铺知识</h2>
+          <p>自由文本，整体喂给 AI 作为回答依据。写商品详情、常见问题、发货说明、售后政策等。</p>
+        </div>
+        <textarea id="knowledgeText" rows="10" placeholder="例：&#10;本店卖 HeyGen 会员号，199 元/个，拍下后自动发货。&#10;账号有效期 30 天，不支持退款，但 7 天内失效包补。&#10;发货后请尽快改密码。"></textarea>
+      </div>
+    </section>
+
+    <!-- 商品发货 -->
+    <section id="tab-products" class="panel">
+      <div class="card">
+        <div class="card-head">
+          <h2>自动发货规则</h2>
+          <p>发货只对接口返回「待发货」的订单，按<strong>商品标题 + 规格 + 价格</strong>精确匹配（同款不同价位分开发货，避免发错）。每个订单只发一次。</p>
+        </div>
+        <div class="inline-actions" style="margin-bottom:14px">
+          <button id="loadSkus" class="btn secondary">🔄 从接口识别我的商品规格</button>
+          <span id="skuResult" role="status"></span>
+        </div>
+        <div id="skuPicker"></div>
+        <div id="prodList" class="entry-list"></div>
+        <button id="addProd" class="btn secondary add-btn">＋ 手动添加商品</button>
+      </div>
+    </section>
+
+    <!-- 库存总览 -->
+    <section id="tab-stock" class="panel">
+      <div class="card">
+        <div class="card-head">
+          <h2>库存总览</h2>
+          <p>一眼看清每个商品/规格：放了哪些号、卖出多少、还剩多少。库存不足会标红，可直接补货。</p>
+        </div>
+        <div class="inline-actions" style="margin-bottom:14px">
+          <span id="stockSummary" class="stock-summary"></span>
+        </div>
+        <div id="stockTable"></div>
+        <button id="addProdFromStock" class="btn secondary add-btn" style="margin-top:14px">＋ 添加新商品 / 规格</button>
+      </div>
+    </section>
+
+    <!-- 行为设置 -->
+    <section id="tab-behavior" class="panel">
+      <div class="card">
+        <div class="card-head">
+          <h2>回复行为</h2>
+          <p>控制回复节奏，模拟人工操作，降低风控风险</p>
+        </div>
+        <label>兜底默认回复（知识库和 AI 都没结果时；留空则不回复）
+          <input id="defaultReply">
+        </label>
+        <label>机器人回复标识（自动回复会带上这句，让买家知道是机器人回复；留空则不加）
+          <input id="botReplyMark">
+        </label>
+        <label>标识位置
+          <select id="botReplyMarkPosition">
+            <option value="suffix">加在回复末尾</option>
+            <option value="prefix">加在回复开头</option>
+          </select>
+        </label>
+        <hr class="divider">
+        <label>引流/线下交易 敏感词（买家消息含任意一个 → 只回下面固定话术，AI 不介入，防风控；逗号分隔）
+          <input id="riskKeywords">
+        </label>
+        <label>命中敏感词时的固定回复
+          <input id="riskReply">
+        </label>
+        <hr class="divider">
+        <label>转人工关键词（买家消息含任意一个即转人工，逗号分隔）
+          <input id="humanHandoffKeywords">
+        </label>
+        <label>转人工安抚语（命中后自动回这句让买家等候；留空则只暂停不回话）
+          <input id="humanHandoffReply">
+        </label>
+        <label>人工接管时长（分钟，期间该会话不自动回复，到期自动恢复）
+          <input id="humanHandoffCooldownMinutes" type="number" min="5" max="1440">
+        </label>
+        <label>本人回复后静默时长（分钟）：你手动回复某买家后，这段时间内机器人不打扰该会话，超时没回才接管（0=关闭）
+          <input id="humanTakeoverMinutes" type="number" min="0" max="1440">
+        </label>
+        <div class="row">
+          <label>回复延迟最小 (ms)
+            <input id="replyDelayMinMs" type="number" min="0">
+          </label>
+          <label>回复延迟最大 (ms)
+            <input id="replyDelayMaxMs" type="number" min="0">
+          </label>
+        </div>
+        <div class="row">
+          <label>扫描间隔 (ms)
+            <input id="pollIntervalMs" type="number" min="2000">
+          </label>
+          <label>每会话每小时最多回复
+            <input id="maxRepliesPerConvPerHour" type="number" min="1" max="60">
+          </label>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2>发货设置</h2>
+          <p>发货状态直接读取闲鱼订单接口（只对「待发货」且未退款的订单发货），不依赖页面标签，避免发错货。</p>
+        </div>
+        <label class="check">
+          <input id="autoDeliver" type="checkbox">
+          <span class="toggle" aria-hidden="true"></span>
+          开启自动发货（关闭后只回复、不发货，全部人工处理）
+        </label>
+        <label class="check">
+          <input id="autoConsign" type="checkbox">
+          <span class="toggle" aria-hidden="true"></span>
+          发完卡密后自动点订单「发货」（无需物流，推进交易避免超时退款）
+        </label>
+        <label class="check">
+          <input id="keepTabAlive" type="checkbox">
+          <span class="toggle" aria-hidden="true"></span>
+          标签保活：工作台标签被关时后台自动重开（浏览器开着即可，无需一直守着页面）
+        </label>
+        <label>发货说明（随自动发货一起提交给闲鱼，可留空）
+          <input id="consignText" placeholder="如：虚拟商品，账号已通过聊天发送">
+        </label>
+        <label>全局发货话术模板（商品规则没单独填模板时用这个；<code>{卡密}</code> 会替换为当次发的卡密）
+          <textarea id="deliveryTemplate" rows="5"></textarea>
+        </label>
+        <label>发货标记（发货消息的开头标记，用于判断是否已发过货）
+          <input id="deliveryDoneMark">
+        </label>
+      </div>
+    </section>
+
+    <!-- 高级 -->
+    <section id="tab-advanced" class="panel">
+      <div class="card">
+        <div class="card-head">
+          <h2>数据源：本地后端（MySQL）</h2>
+          <p>填了后端地址，则卡密库存、发货记录、知识库/商品规则都存到你的 MySQL 数据库（发货取卡走数据库事务，并发也不会发错/发重）。留空则用浏览器本地存储。</p>
+        </div>
+        <label>后端地址
+          <input id="backendUrl" placeholder="http://127.0.0.1:8788">
+        </label>
+        <label>访问令牌（与后端 .env 的 AUTH_TOKEN 一致，后端留空则此处留空）
+          <input id="backendToken" type="password" autocomplete="off">
+        </label>
+        <div class="inline-actions">
+          <button id="testBackend" class="btn secondary">测试连接</button>
+          <span id="backendResult" role="status"></span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2>选择器覆盖</h2>
+          <p>闲鱼页面改版导致插件失效时，在此用 JSON 覆盖默认选择器（键名见 content/selectors.js），留空使用默认。</p>
+        </div>
+        <textarea id="selectorOverrides" rows="8" class="mono" placeholder='{"convItem": "[class*=\"conversation-item--\"]"}'></textarea>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2>数据导入 / 导出</h2>
+          <p>备份或迁移全部配置（含 API Key、知识库、卡密库存）</p>
+        </div>
+        <div class="inline-actions">
+          <button id="exportBtn" class="btn secondary">导出全部配置</button>
+          <button id="importBtn" class="btn secondary">导入配置</button>
+          <input id="importFile" type="file" accept=".json" hidden>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script src="../backend-client.js"></script>
+<script src="options.js"></script>
+</body>
+</html>

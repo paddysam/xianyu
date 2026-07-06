@@ -850,7 +850,10 @@
 
   async function askAI(context) {
     const resp = await new Promise(resolve =>
-      chrome.runtime.sendMessage({ type: 'GEN_REPLY', context }, resolve));
+      chrome.runtime.sendMessage({ type: 'GEN_REPLY', context }, (r) => {
+        void chrome.runtime.lastError; // 签收传输层错误（SW 重启/通道关闭），避免记 Unchecked
+        resolve(r);                    // 失败时 r 为 undefined，下面按"无响应"处理
+      }));
     if (resp && resp.ok) return resp.reply;
     log('error', 'AI 调用失败: ' + (resp && resp.error || '无响应'));
     return null;
@@ -1208,8 +1211,12 @@
   function keepAlivePort() {
     try {
       const port = chrome.runtime.connect({ name: 'xy-keepalive' });
-      // 断开后（SW 回收/5分钟上限）稍后重连，尽量保持"有扩展活动"
-      port.onDisconnect.addListener(() => { setTimeout(keepAlivePort, 2000); });
+      // 断开后（SW 回收/5分钟上限/页面进往返缓存）稍后重连，尽量保持"有扩展活动"。
+      // 读一下 lastError 表示"已签收"，否则 Chrome 会记 Unchecked runtime.lastError
+      port.onDisconnect.addListener(() => {
+        void chrome.runtime.lastError;
+        setTimeout(keepAlivePort, 2000);
+      });
     } catch (_) { /* 扩展上下文失效时忽略 */ }
   }
 

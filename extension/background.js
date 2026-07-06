@@ -88,7 +88,9 @@ chrome.alarms.onAlarm.addListener((a) => {
 
 // 接受内容脚本的常连接（用于降低标签被浏览器冻结的概率）
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name === 'xy-keepalive') port.onDisconnect.addListener(() => {});
+  // 断开回调里必须"读一下" lastError（页面进往返缓存时通道会被 Chrome 掐断），
+  // 否则会在扩展错误列表里记一条 Unchecked runtime.lastError
+  if (port.name === 'xy-keepalive') port.onDisconnect.addListener(() => { void chrome.runtime.lastError; });
 });
 
 /**

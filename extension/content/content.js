@@ -36,6 +36,7 @@
     activeSig: null,             // 当前激活会话已处理到的消息签名（兜底检查去重用）
     stockCache: null,            // 后端模式库存快照缓存 {ts, list}
     humanReplyAt: {},            // convKey -> ts 本人最后一次手动回复该会话的时间（持久化）
+    botMuted: {},                // convKey -> {ts, name} 手动"免打扰"名单：机器人对这些用户永不自动回复（持久化）
     humanQA: [],                 // 本人真实问答样本 [{q,a,ts}]，喂给 AI 学你的风格（最多200，持久化）
     botSending: false,           // 机器人正在发送（让"本人回复"监听忽略这次）
     humanWatchBound: false,      // 手动回复监听是否已绑定
@@ -366,6 +367,21 @@
     if (win <= 0) return false;
     const at = state.humanReplyAt[key] || 0;
     return Date.now() - at < win;
+  }
+
+  // ---------- 手动免打扰名单（永久，直到你手动取消）----------
+
+  /** 该用户是否被你手动设为"不用机器人" */
+  function isMuted(key) {
+    return !!(key && state.botMuted && state.botMuted[key]);
+  }
+
+  /** 设/取消某会话的免打扰，并持久化 */
+  async function setMuted(key, name, on) {
+    if (!key) return;
+    if (on) state.botMuted[key] = { ts: Date.now(), name: name || '' };
+    else delete state.botMuted[key];
+    try { await chrome.storage.local.set({ botMuted: state.botMuted }); } catch (_) {}
   }
 
   // ---------- 回复决策 ----------
@@ -811,6 +827,11 @@
 
   async function handleConversation(conv) {
     const S = state.S;
+    // ---- 免打扰名单最高优先：你手动设了"此用户不用机器人" → 连会话都不点开，一句不回 ----
+    if (isMuted(conv.key)) {
+      state.baseline.set(conv.key, conv.lastMsg);
+      return;
+    }
     conv.el.click();
     // 等聊天窗口切到该会话：激活项 key 匹配，且消息列表已渲染
     // （虚拟列表可能重建节点，不能依赖 conv.el 引用本身）
@@ -972,6 +993,7 @@
     if (!cur) return;
     if (cur.sig === state.activeSig) return;         // 没有新变化
     state.activeSig = cur.sig;                        // 先记签名，防止失败重试刷屏
+    if (isMuted(cur.conv.key)) return;               // 免打扰名单里的用户：兜底也不回
     if (!cur.last || cur.last.role !== 'buyer' || !cur.last.text) return; // 最新不是买家文本，不动作
     await handleConversation(cur.conv);
   }
@@ -987,7 +1009,7 @@
       // 再叠加基线比对：启动时已挂着未读、且最后一条消息至今没变的会话跳过，
       // 保证"只回复启用之后的新消息"，不翻旧账（买家再发新消息后 lastMsg 变化即恢复处理）
       const convs = scanConvList().filter(c =>
-        c.unread && state.baseline.get(c.key) !== c.lastMsg);
+        c.unread && !isMuted(c.key) && state.baseline.get(c.key) !== c.lastMsg);
       for (const conv of convs) {
         await handleConversation(conv);
         await sleep(rand(1000, 2000));
@@ -1031,13 +1053,14 @@
   // ---------- 启动 / 停止 ----------
 
   async function loadConfig() {
-    const data = await chrome.storage.local.get(['settings', 'kb', 'products', 'deliveredOrders', 'humanHandoff', 'humanReplyAt', 'humanQA']);
+    const data = await chrome.storage.local.get(['settings', 'kb', 'products', 'deliveredOrders', 'humanHandoff', 'humanReplyAt', 'botMuted', 'humanQA']);
     state.settings = data.settings || {};
     state.kb = data.kb || { entries: [], knowledgeText: '' };
     state.products = data.products || [];
     state.deliveredOrders = data.deliveredOrders || {};
     state.humanHandoff = data.humanHandoff || {};
     state.humanReplyAt = data.humanReplyAt || {};
+    state.botMuted = data.botMuted || {};
     state.humanQA = data.humanQA || [];
     state.S = window.__XY_MERGE_SELECTORS(state.settings.selectorOverrides);
 
@@ -1117,6 +1140,8 @@
     }
     if (changes.kb) state.kb = changes.kb.newValue;
     if (changes.products) state.products = changes.products.newValue;
+    // 免打扰名单在别的工作台标签被改动 → 本标签同步，并刷新按钮显示
+    if (changes.botMuted) { state.botMuted = changes.botMuted.newValue || {}; updateMuteButton(); }
   });
 
   // ---------- 页面右下角状态角标 ----------
@@ -1175,6 +1200,61 @@
     }
   }
 
+  // ---------- 右下角"对该用户停用机器人"按钮（作用于当前打开的会话）----------
+
+  /** 点按钮：把当前打开的会话加入/移出免打扰名单 */
+  async function onMuteClick() {
+    const act = document.querySelector(state.S.convActive);
+    if (!act) return;
+    const conv = parseConvItem(act);
+    if (!conv.key || SYSTEM_CONV_NAMES.includes(conv.name)) return;
+    const turnOn = !isMuted(conv.key);               // 当前没静音 → 这次点是开启静音
+    await setMuted(conv.key, conv.name, turnOn);
+    updateMuteButton();
+    const who = conv.name || conv.key.slice(0, 12) + '…';
+    log(turnOn ? 'warn' : 'info', turnOn
+      ? `已对「${who}」停用机器人，之后不再自动回复该用户（发货不受影响）`
+      : `已恢复「${who}」的机器人自动回复`);
+  }
+
+  /**
+   * 刷新按钮：反映"当前打开的会话"的静音状态。
+   * 机器人跑批期间（state.busy）会程序化切换会话，此时不改按钮指向，
+   * 避免你看到/点到的是机器人临时打开的别人会话。
+   */
+  function updateMuteButton() {
+    if (state.busy) return;
+    let b = document.getElementById('__xy_mute_btn');
+    const act = document.querySelector(state.S && state.S.convActive || '[class*="conversation-item-active--"]');
+    const conv = act ? parseConvItem(act) : null;
+    const show = conv && conv.key && !SYSTEM_CONV_NAMES.includes(conv.name) &&
+                 !!document.querySelector(state.S.msgList);
+    if (!show) { if (b) b.style.display = 'none'; return; }
+    if (!b) {
+      b = document.createElement('div');
+      b.id = '__xy_mute_btn';
+      b.style.cssText =
+        'position:fixed;right:16px;bottom:56px;z-index:99999;padding:7px 14px;' +
+        'border-radius:18px;font-size:12px;font-weight:600;cursor:pointer;user-select:none;' +
+        'font-family:"Segoe UI","Microsoft YaHei",sans-serif;' +
+        'box-shadow:0 2px 10px rgba(0,0,0,.18);border:1px solid rgba(0,0,0,.06);';
+      b.addEventListener('click', onMuteClick);
+      document.body.appendChild(b);
+    }
+    b.style.display = 'block';
+    const muted = isMuted(conv.key);
+    const who = conv.name || '该用户';
+    b.title = muted ? '当前对此用户已停用机器人，点击恢复自动回复'
+                    : '点击后机器人不再自动回复此用户（仅影响聊天回复，不影响自动发货）';
+    if (muted) {
+      b.style.background = '#fff7ed'; b.style.color = '#b45309';
+      b.textContent = `🔔 「${who}」已停用机器人 · 点击恢复`;
+    } else {
+      b.style.background = '#fff'; b.style.color = '#374151';
+      b.textContent = `🔕 对「${who}」停用机器人`;
+    }
+  }
+
   // ---------- 入口 ----------
 
   (async () => {
@@ -1184,6 +1264,9 @@
                         location.hash.includes('im'), 30000, 500);
     await loadConfig();
     mountBadge();
+    // "对该用户停用机器人"按钮：随你切换会话实时反映当前会话的静音状态，
+    // 独立于助手开关（助手关着也能预先给某人设免打扰）
+    setInterval(updateMuteButton, 1000);
     bindHumanReplyWatch(); // 监听你的手动发送，机器人据此让位
     keepAlivePort();       // 常连接，降低后台被冻结的概率
     // 掉线守护心跳：只要工作台页面开着就持续上报，页面关闭/登出后心跳自然停止

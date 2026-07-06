@@ -34,7 +34,7 @@ const sandbox = {
   rand: (min, max) => ({ min, max }),
   backend: { enabled: () => false },
 };
-const fnNames = ['matchProduct', 'prepareDelivery', 'consumeCard', 'looksLikeCredential', 'replyDelay', 'buildDeliveryInfo', 'withBotMark'];
+const fnNames = ['matchProduct', 'prepareDelivery', 'consumeCard', 'looksLikeCredential', 'replyDelay', 'buildDeliveryInfo', 'withBotMark', 'isMuted', 'setMuted'];
 const code = fnNames.map(extract).join('\n\n');
 const vm = require('vm');
 vm.createContext(sandbox);
@@ -152,6 +152,28 @@ console.log('\n[C] consumeCard 扣库存');
   ok('零库存规格 → 如实说缺货', info.includes('暂时缺货'));
   info = F.buildDeliveryInfo('Figma会员', [{ match: 'HeyGen', spec: '', price: '', stock: 3 }]);
   ok('未配置商品 → 明确"人工发货"', info.includes('人工发货'));
+
+  // ========== H. 免打扰名单（对某用户停用机器人） ==========
+  console.log('\n[H] 免打扰名单 isMuted/setMuted');
+  sandbox.state.botMuted = {};
+  ok('默认没人被静音', !F.isMuted('avatarKeyA'));
+  ok('空 key → false（不误判）', !F.isMuted(''));
+  ok('null key → false', !F.isMuted(null));
+  await F.setMuted('avatarKeyA', '张三', true);
+  ok('设置后 → 该用户被静音', F.isMuted('avatarKeyA'));
+  eq('  持久化写入 storage.botMuted', !!stored.botMuted && !!stored.botMuted['avatarKeyA'], true);
+  eq('  记录了昵称', stored.botMuted['avatarKeyA'].name, '张三');
+  ok('别的用户不受影响', !F.isMuted('avatarKeyB'));
+  // tick 过滤模拟：未读会话里静音的那个应被排除，不被机器人打开
+  const scanned = [
+    { key: 'avatarKeyA', name: '张三', unread: true },
+    { key: 'avatarKeyB', name: '李四', unread: true },
+  ];
+  eq('tick 过滤：静音用户被排除，只留没静音的',
+    scanned.filter(c => c.unread && !F.isMuted(c.key)).map(c => c.name), ['李四']);
+  await F.setMuted('avatarKeyA', '张三', false);
+  ok('取消静音后 → 恢复自动回复', !F.isMuted('avatarKeyA'));
+  eq('  从 storage 移除', stored.botMuted['avatarKeyA'], undefined);
 
   console.log('\n===== content.js 逻辑: ' + pass + ' 通过, ' + fail + ' 失败 =====');
   process.exit(fail ? 1 : 0);

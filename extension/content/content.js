@@ -1232,7 +1232,7 @@
    * 避免你看到/点到的是机器人临时打开的别人会话。
    */
   function updateMuteButton() {
-    if (state.busy) return;
+    if (state.busy || !state.S) return;  // 配置未加载完(state.S 空)时触发会抛错，直接跳过
     let b = document.getElementById('__xy_mute_btn');
     const act = document.querySelector(state.S && state.S.convActive || '[class*="conversation-item-active--"]');
     const conv = act ? parseConvItem(act) : null;
@@ -1302,6 +1302,15 @@
     const oldText = btn ? btn.textContent : '';
     if (btn) { btn.textContent = '⏳ 正在核对订单…'; btn.style.pointerEvents = 'none'; btn.style.opacity = '.7'; }
     try {
+      // 对称互斥：deliverBusy 已占锁挡住"新的 tick"，但可能有一轮 tick 正在跑
+      // （自动回复中途会切会话、写输入框）。等它收尾再动手，否则两边互相清空输入框
+      if (state.busy) {
+        if (btn) btn.textContent = '⏳ 等待自动流程让位…';
+        if (!(await waitFor(() => !state.busy, 15000))) {
+          alert('自动客服正忙（自动回复未结束），请几秒后再点一次'); return;
+        }
+        if (btn) btn.textContent = '⏳ 正在核对订单…';
+      }
       let orders;
       try {
         orders = await bridge.call('fetchWaitShipOrders');
@@ -1345,8 +1354,9 @@
   /** 刷新手动发货按钮：打开非系统会话时显示（点击时才做权威订单核对） */
   function updateDeliverButton() {
     // 机器人跑批 / 手动发货正在处理中：都不改按钮文字，
-    // 否则每秒一次的刷新会把 deliverToActiveConversation 设置的"⏳ 正在核对订单…"立刻覆盖掉
-    if (state.busy || state.deliverBusy) return;
+    // 否则每秒一次的刷新会把 deliverToActiveConversation 设置的"⏳ 正在核对订单…"立刻覆盖掉。
+    // state.S 未加载完时也跳过（选择器还没就绪）
+    if (state.busy || state.deliverBusy || !state.S) return;
     let b = document.getElementById('__xy_deliver_btn');
     const act = document.querySelector(state.S && state.S.convActive || '[class*="conversation-item-active--"]');
     const conv = act ? parseConvItem(act) : null;

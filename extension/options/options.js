@@ -503,15 +503,26 @@ function renderStock() {
     const i = Number(b.dataset.i);
     const p = products[i];
     if (!confirm('确认这张卡已经手动发出、从库存移除？\n移除后机器人不会再把它自动发给别人（此操作不可撤销）。')) return;
+    // 立刻禁用防连点：本地模式按索引删，连点两次第二下会删错另一张卡；
+    // 后端模式连点会把 stock/sold 计数重复加减
+    b.disabled = true;
     if (backendMode) {
       const cid = Number(b.dataset.cid);
+      let r;
       try {
-        const r = await backend.manualDeliverCard(p.id, cid);
-        if (r.status === 'notFound') { alert('这张卡在数据库里已不存在，可能已被移除。刷新一下即可。'); }
-      } catch (e) { alert('移除失败：' + e.message); return; }
+        r = await backend.manualDeliverCard(p.id, cid);
+      } catch (e) { alert('移除失败：' + e.message); b.disabled = false; return; }
       p._cards = (p._cards || []).filter(c => c.id !== cid);
-      p.stock = Math.max(0, (p.stock || 0) - 1);
-      p.sold = (p.sold || 0) + 1;
+      if (r.status === 'removed') {
+        p.stock = Math.max(0, (p.stock || 0) - 1);
+        p.sold = (p.sold || 0) + 1;
+      } else if (r.status === 'alreadyUsed') {
+        // 可能刚被自动发货用掉：不再在库是事实，但发货记录已有，不重复计
+        p.stock = Math.max(0, (p.stock || 0) - 1);
+        alert('这张卡已是「已用」状态（可能刚被自动发货用掉），已从列表移除，未重复记账。');
+      } else if (r.status === 'notFound') {
+        alert('这张卡在数据库里已不存在，已从列表移除。');
+      }
     } else {
       const ci = Number(b.dataset.ci);
       p.cards = (p.cards || []).filter((_, idx) => idx !== ci);

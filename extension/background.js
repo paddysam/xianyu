@@ -36,6 +36,8 @@ const DEFAULT_SETTINGS = {
   replyDelayMinMs: 2000,        // 模拟人工：回复前随机延迟
   replyDelayMaxMs: 6000,
   pollIntervalMs: 5000,         // 扫描未读会话的间隔
+  pauseWhenUserActive: true,    // 你正在操作工作台时，机器人不切走你正看的会话（输入框有草稿时绝不切）
+  userIdleSeconds: 8,           // 停手几秒后判定"你已离手"，机器人恢复处理（越小恢复越快）
   maxRepliesPerConvPerHour: 10, // 防刷屏/防对轰
   keepTabAlive: true,           // 工作台标签被关时，后台自动重开一个（浏览器开着即可，无需一直守着页面）
   autoDeliver: true,            // 自动发货总开关（状态取自交易接口，非页面标签）

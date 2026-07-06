@@ -640,6 +640,12 @@
           continue;
         }
         if (state.deliveredOrders[order.orderId]) continue;    // 已发过（本地缓存）：快速跳过
+        // 发多单要几十秒，你中途回来操作 → 立刻收手不抢屏；
+        // 没发的单还是"待发货"，停手后下一轮自动补发，不会漏
+        if (userActive()) {
+          log('info', '检测到你开始操作，剩余待发货订单暂缓（停手几秒后自动继续发）');
+          break;
+        }
         await deliverOrder(order);
         await sleep(rand(1500, 3000));
       }
@@ -1062,6 +1068,12 @@
         }
       } else {
         for (const conv of convs) {
+          // 每处理一个前再查一次：跑批要几十秒，你可能中途回来操作了 → 立刻收手，
+          // 剩余的未读红点还在，停手几秒后下一轮自动继续，不会漏
+          if (userActive()) {
+            log('info', '检测到你开始操作，剩余未读会话暂缓（停手几秒后自动继续）');
+            break;
+          }
           await handleConversation(conv);
           await sleep(rand(1000, 2000));
         }

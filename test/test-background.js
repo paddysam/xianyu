@@ -94,6 +94,10 @@ function genReply(context) {
   ok('system 含店铺知识库', msgs[0].content.includes('拍下自动发货'));
   ok('system 含实时库存口径', msgs[0].content.includes('新版(¥169)：有货'));
   ok('system 含本人风格范本', msgs[0].content.includes('在的哈'));
+  ok('system 声明多商品知识互相独立', msgs[0].content.includes('相互独立'));
+  ok('system 含跨商品提问规则（问A商品不能拿当前B商品否定）',
+    msgs[0].content.includes('买家问的不一定是这个商品') && msgs[0].content.includes('绝不能拿当前商品'));
+  ok('system 要求知识库没写的不猜、先确认', msgs[0].content.includes('稍等我确认一下'));
   const convo = msgs.slice(1);
   eq('对话以 user 开头（开头的 assistant 已裁掉）', convo[0].role, 'user');
   eq('连续买家消息合并为一条', convo[0].content, '在吗\n有货吗');

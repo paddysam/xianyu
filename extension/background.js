@@ -223,10 +223,15 @@ async function genReply(msg) {
   const knowledgeText = (ctx.knowledgeText !== undefined && ctx.knowledgeText !== null)
     ? ctx.knowledgeText : (kb && kb.knowledgeText);
   if (knowledgeText) {
-    sys += '\n\n以下是店铺知识库，回答时优先依据这些内容：\n' + knowledgeText;
+    sys += '\n\n【店铺知识库 · 最高事实依据】店里同时在售多个互不相关的商品' +
+      '（如 HeyGen、Figma、Cursor 等），知识库里各商品的信息相互独立、不可混用：\n' + knowledgeText;
   }
   if (ctx.productTitle) {
-    sys += '\n\n买家正在咨询的商品：' + ctx.productTitle;
+    sys += '\n\n当前聊天窗关联的商品：' + ctx.productTitle +
+      '\n注意：买家问的不一定是这个商品。若买家在问题里明确提到了店里另一个商品或其功能' +
+      '（以买家用词为准，如问"figma 支持 make 吗"就是在问 Figma），' +
+      '必须按知识库中【那个商品】的条目如实回答，绝不能拿当前商品的情况去回答或否定另一个商品。' +
+      '知识库里没写的功能细节不要猜、不要否定，回复"稍等我确认一下哈"。';
   }
   if (ctx.humanStyle) {
     sys += '\n\n【模仿本人风格】以下是卖家本人过去真实回复的例子。请学习这种语气、用词、称呼、口头禅和答法，' +

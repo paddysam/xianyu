@@ -998,7 +998,8 @@
     if (await sendReply(reply, conv.key)) {
       recordReply(conv.key);
       bumpStat('repliesSent');
-      log('info', `[${source}] 回复「${conv.name}」: ${reply.slice(0, 50)}`);
+      // 日志带上商品上下文：AI 答串商品时，一眼能看出是不是右侧面板挂错了商品
+      log('info', `[${source}] 回复「${conv.name}」(商品:${productTitle || '无'}): ${reply.slice(0, 50)}`);
     }
     // 把自己刚发的话记入基线，避免下一轮误判为新消息
     await sleep(800);

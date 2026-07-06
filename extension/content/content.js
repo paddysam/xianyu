@@ -606,22 +606,28 @@
           continue;
         }
         if (state.deliveredOrders[order.orderId]) continue;    // 已发过（本地缓存）：快速跳过
-
-        const skuLabel = order.title + (order.spec ? ' / ' + order.spec : '') +
-          (order.price ? ' ¥' + order.price : '');
-        const doneMark = state.settings.deliveryDoneMark || '【自动发货】';
-
-        if (backend.enabled()) {
-          await deliverViaBackend(order, skuLabel, doneMark);
-        } else {
-          await deliverLocal(order, skuLabel, doneMark);
-        }
+        await deliverOrder(order);
         await sleep(rand(1500, 3000));
       }
     } catch (e) {
       log('error', 'deliveryPass 异常: ' + (e && e.message));
     } finally {
       state.deliverBusy = false;
+    }
+  }
+
+  /**
+   * 发一个订单（自动轮询与手动按钮共用同一条路径，确保去重/校验完全一致）。
+   * 调用前应已确认：状态待发货、未退款、未在 deliveredOrders 里。
+   */
+  async function deliverOrder(order) {
+    const skuLabel = order.title + (order.spec ? ' / ' + order.spec : '') +
+      (order.price ? ' ¥' + order.price : '');
+    const doneMark = state.settings.deliveryDoneMark || '【自动发货】';
+    if (backend.enabled()) {
+      await deliverViaBackend(order, skuLabel, doneMark);
+    } else {
+      await deliverLocal(order, skuLabel, doneMark);
     }
   }
 
@@ -1255,6 +1261,109 @@
     }
   }
 
+  // ---------- 手动发货按钮（给当前打开会话的买家发货）----------
+
+  /**
+   * 从订单列表挑出该买家"能安全发货"的订单（纯函数，便于自测）：
+   *   forBuyer - 这个买家的所有订单
+   *   pending  - 其中"待发货 + 未退款"的（权威状态，不认页面标签）
+   *   todo     - pending 里"还没发过货"的（去掉 deliveredMap 命中的），真正要发的
+   */
+  function pickDeliverableOrders(orders, nick, deliveredMap) {
+    const all = Array.isArray(orders) ? orders : [];
+    const forBuyer = all.filter(o => o && o.buyerNick === nick);
+    const pending = forBuyer.filter(o => o.orderStatus === '待发货' && !o.inRefund);
+    const todo = pending.filter(o => !(deliveredMap && deliveredMap[o.orderId]));
+    return { forBuyer, pending, todo };
+  }
+
+  /**
+   * 手动发货：给当前打开会话的买家发货。
+   * 安全要点（正是你担心的重复发货）：
+   *   1. 用交易接口权威判断"有没有待发货订单"，没有就不发（不认页面标签）；
+   *   2. 复用与自动发货同一条 deliverOrder 路径 → 共享 orderId 幂等去重、
+   *      本地 deliveredOrders 缓存、DOM 发货标记三重去重；
+   *   3. deliverBusy 互斥锁：机器人正在自动发 / 你连点两次 → 第二个直接挡下；
+   *   4. 后端 /api/deliver 的 orderId 唯一约束是最后兜底，绝不会扣两张卡。
+   */
+  async function deliverToActiveConversation() {
+    const act = document.querySelector(state.S.convActive);
+    if (!act) { alert('请先打开一个买家的会话，再点发货'); return; }
+    const conv = parseConvItem(act);
+    const nick = conv.name;
+    if (!nick || SYSTEM_CONV_NAMES.includes(nick)) { alert('请打开一个买家会话再发货'); return; }
+    // 互斥：机器人正在发 / 上一次点击还没跑完 → 挡下，避免重复
+    if (state.deliverBusy) { alert('正在发货处理中，请稍候几秒再点～'); return; }
+    state.deliverBusy = true;
+    const btn = document.getElementById('__xy_deliver_btn');
+    const oldText = btn ? btn.textContent : '';
+    if (btn) { btn.textContent = '⏳ 正在核对订单…'; btn.style.pointerEvents = 'none'; btn.style.opacity = '.7'; }
+    try {
+      let orders;
+      try {
+        orders = await bridge.call('fetchWaitShipOrders');
+      } catch (e) {
+        alert('拉取订单失败：' + (e && e.message) + '\n请确认工作台已登录后重试'); return;
+      }
+      const { forBuyer, pending, todo } = pickDeliverableOrders(orders, nick, state.deliveredOrders);
+      // 权威判断：这个买家有没有"待发货且未退款"的订单
+      if (!pending.length) {
+        if (forBuyer.some(o => o.inRefund))
+          alert(`买家「${nick}」的订单正在退款中，未发货。`);
+        else
+          alert(`买家「${nick}」当前没有「待发货」订单。\n可能是：还没拍下 / 未付款 / 或已经发过货了。`);
+        return;
+      }
+      // 已发过的（缓存里有）过滤掉，避免重复
+      if (!todo.length) {
+        alert(`买家「${nick}」这些订单都已经发过货了，未重复发送。`); return;
+      }
+      if (todo.length > 1 &&
+          !confirm(`买家「${nick}」有 ${todo.length} 个待发货订单，确认全部发货？`)) return;
+
+      let ok = 0, fail = 0;
+      for (const order of todo) {
+        await deliverOrder(order);                       // 与自动发货同一条安全路径
+        if (state.deliveredOrders[order.orderId]) ok++; else fail++;
+        await sleep(rand(600, 1200));
+      }
+      if (ok && !fail) alert(`✓ 已给「${nick}」发货成功（${ok} 单）`);
+      else if (ok && fail) alert(`部分完成：成功 ${ok} 单，${fail} 单未完成（缺货/需人工，详见插件弹窗日志）`);
+      else alert(`发货未完成：缺货 / 没匹配的发货规则 / 需人工，详见插件弹窗「运行日志」。`);
+    } catch (e) {
+      log('error', '手动发货异常: ' + (e && e.message));
+      alert('发货出错：' + (e && e.message));
+    } finally {
+      state.deliverBusy = false;
+      if (btn) { btn.textContent = oldText; btn.style.pointerEvents = ''; btn.style.opacity = ''; }
+    }
+  }
+
+  /** 刷新手动发货按钮：打开非系统会话时显示（点击时才做权威订单核对） */
+  function updateDeliverButton() {
+    if (state.busy) return;   // 机器人跑批切换会话时不改按钮，免得指向错人
+    let b = document.getElementById('__xy_deliver_btn');
+    const act = document.querySelector(state.S && state.S.convActive || '[class*="conversation-item-active--"]');
+    const conv = act ? parseConvItem(act) : null;
+    const show = conv && conv.key && !SYSTEM_CONV_NAMES.includes(conv.name) &&
+                 !!document.querySelector(state.S.msgList);
+    if (!show) { if (b) b.style.display = 'none'; return; }
+    if (!b) {
+      b = document.createElement('div');
+      b.id = '__xy_deliver_btn';
+      b.style.cssText =
+        'position:fixed;right:16px;bottom:96px;z-index:99999;padding:8px 16px;' +
+        'border-radius:18px;font-size:12px;font-weight:700;cursor:pointer;user-select:none;' +
+        'font-family:"Segoe UI","Microsoft YaHei",sans-serif;background:#16a34a;color:#fff;' +
+        'box-shadow:0 2px 10px rgba(22,163,74,.35);';
+      b.title = '给当前会话买家发货：会先用交易接口核对确有待发货订单，且不会重复发';
+      b.addEventListener('click', deliverToActiveConversation);
+      document.body.appendChild(b);
+    }
+    b.style.display = 'block';
+    b.textContent = `📦 给「${conv.name || '该买家'}」发货`;
+  }
+
   // ---------- 入口 ----------
 
   (async () => {
@@ -1264,9 +1373,10 @@
                         location.hash.includes('im'), 30000, 500);
     await loadConfig();
     mountBadge();
-    // "对该用户停用机器人"按钮：随你切换会话实时反映当前会话的静音状态，
-    // 独立于助手开关（助手关着也能预先给某人设免打扰）
-    setInterval(updateMuteButton, 1000);
+    // 聊天页两个按钮随你切换会话实时刷新（都独立于助手开关）：
+    //   · 免打扰按钮：反映当前会话是否已停用机器人
+    //   · 手动发货按钮：给当前会话买家发货（点击时才做权威订单核对+去重）
+    setInterval(() => { updateMuteButton(); updateDeliverButton(); }, 1000);
     bindHumanReplyWatch(); // 监听你的手动发送，机器人据此让位
     keepAlivePort();       // 常连接，降低后台被冻结的概率
     // 掉线守护心跳：只要工作台页面开着就持续上报，页面关闭/登出后心跳自然停止

@@ -34,7 +34,7 @@ const sandbox = {
   rand: (min, max) => ({ min, max }),
   backend: { enabled: () => false },
 };
-const fnNames = ['matchProduct', 'prepareDelivery', 'consumeCard', 'looksLikeCredential', 'replyDelay', 'buildDeliveryInfo', 'withBotMark', 'isMuted', 'setMuted'];
+const fnNames = ['matchProduct', 'prepareDelivery', 'consumeCard', 'looksLikeCredential', 'replyDelay', 'buildDeliveryInfo', 'withBotMark', 'isMuted', 'setMuted', 'pickDeliverableOrders'];
 const code = fnNames.map(extract).join('\n\n');
 const vm = require('vm');
 vm.createContext(sandbox);
@@ -174,6 +174,32 @@ console.log('\n[C] consumeCard 扣库存');
   await F.setMuted('avatarKeyA', '张三', false);
   ok('取消静音后 → 恢复自动回复', !F.isMuted('avatarKeyA'));
   eq('  从 storage 移除', stored.botMuted['avatarKeyA'], undefined);
+
+  // ========== I. 手动发货：挑单安全判断（防重复/防误发） ==========
+  console.log('\n[I] pickDeliverableOrders 手动发货挑单');
+  const O = (over) => Object.assign({ buyerNick:'张三', orderStatus:'待发货', inRefund:false, orderId:'x' }, over);
+  let r2;
+  r2 = F.pickDeliverableOrders([
+    O({ orderId:'A', buyerNick:'张三' }),
+    O({ orderId:'B', buyerNick:'李四' }),      // 别的买家
+  ], '张三', {});
+  eq('只挑当前买家的单', r2.todo.map(o=>o.orderId), ['A']);
+  r2 = F.pickDeliverableOrders([O({ orderId:'A', orderStatus:'已发货' })], '张三', {});
+  eq('非"待发货"状态 → 不发（权威状态判断）', r2.todo.length, 0);
+  eq('  也不算 pending', r2.pending.length, 0);
+  r2 = F.pickDeliverableOrders([O({ orderId:'A', inRefund:true })], '张三', {});
+  eq('退款中 → 不发', r2.todo.length, 0);
+  ok('  但能识别为该买家的单（用于提示退款中）', r2.forBuyer.length === 1);
+  r2 = F.pickDeliverableOrders([O({ orderId:'A' })], '张三', { 'A': { ts:1 } });
+  eq('已发过(deliveredOrders命中) → 不重复发', r2.todo.length, 0);
+  r2 = F.pickDeliverableOrders([
+    O({ orderId:'A' }), O({ orderId:'B' }), O({ orderId:'C', inRefund:true })
+  ], '张三', { 'A': { ts:1 } });
+  eq('混合：A已发/B可发/C退款 → 只发 B', r2.todo.map(o=>o.orderId), ['B']);
+  r2 = F.pickDeliverableOrders(null, '张三', {});
+  eq('订单接口返回空 → 安全返回空，不报错', r2.todo.length, 0);
+  r2 = F.pickDeliverableOrders([O({ orderId:'A', buyerNick:'王五' })], '张三', {});
+  eq('买家昵称对不上 → 不发（精确匹配，绝不发给差不多的人）', r2.todo.length, 0);
 
   console.log('\n===== content.js 逻辑: ' + pass + ' 通过, ' + fail + ' 失败 =====');
   process.exit(fail ? 1 : 0);

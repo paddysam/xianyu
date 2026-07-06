@@ -1005,7 +1005,10 @@
   }
 
   async function tick() {
-    if (!state.running || state.busy) return;
+    // deliverBusy 也要挡：手动发货按钮点击后会在当前会话里 sleep 几秒再发送，
+    // 这几秒内若买家追加消息，tick() 的自动回复不能跟手动发货抢同一个输入框
+    // （两边都没有对方感知的锁，同时 sendReply 会互相覆盖写入内容）
+    if (!state.running || state.busy || state.deliverBusy) return;
     state.busy = true;
     try {
       // 1) 自动回复：只处理"有未读红点"的会话。
@@ -1341,7 +1344,9 @@
 
   /** 刷新手动发货按钮：打开非系统会话时显示（点击时才做权威订单核对） */
   function updateDeliverButton() {
-    if (state.busy) return;   // 机器人跑批切换会话时不改按钮，免得指向错人
+    // 机器人跑批 / 手动发货正在处理中：都不改按钮文字，
+    // 否则每秒一次的刷新会把 deliverToActiveConversation 设置的"⏳ 正在核对订单…"立刻覆盖掉
+    if (state.busy || state.deliverBusy) return;
     let b = document.getElementById('__xy_deliver_btn');
     const act = document.querySelector(state.S && state.S.convActive || '[class*="conversation-item-active--"]');
     const conv = act ? parseConvItem(act) : null;

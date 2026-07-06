@@ -26,15 +26,18 @@ function extract(name) {
 // ---------- 沙箱环境 ----------
 const logs = [];
 const stored = {};
+let fakeInputValue = '';   // 模拟聊天输入框里的内容（userActive 用）
 const sandbox = {
-  state: { settings: {}, products: [] },
+  state: { settings: {}, products: [], S: { inputBox: 'textarea' } },
   log: (lv, tx) => logs.push(lv + ': ' + tx),
   chrome: { storage: { local: { set: async (o) => Object.assign(stored, o) } } },
   // rand 返回 {min,max} 便于断言边界（replyDelay 直接透传 rand 的返回值）
   rand: (min, max) => ({ min, max }),
   backend: { enabled: () => false },
+  // 极简 document：只支持 querySelector(inputBox) 返回带 value 的假输入框
+  document: { querySelector: (sel) => (sel === 'textarea' ? { value: fakeInputValue } : null) },
 };
-const fnNames = ['matchProduct', 'prepareDelivery', 'consumeCard', 'looksLikeCredential', 'replyDelay', 'buildDeliveryInfo', 'withBotMark', 'isMuted', 'setMuted', 'pickDeliverableOrders'];
+const fnNames = ['matchProduct', 'prepareDelivery', 'consumeCard', 'looksLikeCredential', 'replyDelay', 'buildDeliveryInfo', 'withBotMark', 'isMuted', 'setMuted', 'pickDeliverableOrders', 'userActive'];
 const code = fnNames.map(extract).join('\n\n');
 const vm = require('vm');
 vm.createContext(sandbox);
@@ -200,6 +203,38 @@ console.log('\n[C] consumeCard 扣库存');
   eq('订单接口返回空 → 安全返回空，不报错', r2.todo.length, 0);
   r2 = F.pickDeliverableOrders([O({ orderId:'A', buyerNick:'王五' })], '张三', {});
   eq('买家昵称对不上 → 不发（精确匹配，绝不发给差不多的人）', r2.todo.length, 0);
+
+  // ========== J. userActive：你在操作时机器人不抢屏 ==========
+  console.log('\n[J] userActive 真人活动检测（防抢窗口）');
+  const now = Date.now();
+  // 基线：没活动、输入框空、开关默认 → 不忙
+  sandbox.state.settings = {};
+  sandbox.state.lastUserActivity = 0;
+  fakeInputValue = '';
+  ok('很久没动 + 输入框空 → 不忙（机器人可处理）', !F.userActive());
+  // 输入框有字 = 正在打字 → 一定判定为忙（不受计时影响）
+  fakeInputValue = '你好，这个多少钱';
+  ok('输入框有草稿 → 忙（绝不切走，正是你要的）', F.userActive());
+  fakeInputValue = '   ';
+  ok('输入框只有空白 → 不算草稿', !F.userActive());
+  fakeInputValue = '';
+  // 刚动过（10 秒前）→ 忙；很久前（超过 60 秒）→ 不忙
+  sandbox.state.lastUserActivity = now - 10000;
+  ok('10秒前动过 → 忙（默认60秒窗口内）', F.userActive());
+  sandbox.state.lastUserActivity = now - 70000;
+  ok('70秒前动过 → 不忙（超过60秒，自动恢复）', !F.userActive());
+  // 开关关掉 → 永远不忙（机器人照常抢，回到旧行为）
+  sandbox.state.settings = { pauseWhenUserActive: false };
+  sandbox.state.lastUserActivity = now;
+  fakeInputValue = '正在打字';
+  ok('开关关掉(pauseWhenUserActive=false) → 强制不忙', !F.userActive());
+  // 自定义空闲秒数
+  sandbox.state.settings = { userIdleSeconds: 5 };
+  sandbox.state.lastUserActivity = now - 8000;
+  fakeInputValue = '';
+  ok('自定义5秒窗口：8秒前动过 → 不忙', !F.userActive());
+  sandbox.state.lastUserActivity = now - 3000;
+  ok('自定义5秒窗口：3秒前动过 → 忙', F.userActive());
 
   console.log('\n===== content.js 逻辑: ' + pass + ' 通过, ' + fail + ' 失败 =====');
   process.exit(fail ? 1 : 0);

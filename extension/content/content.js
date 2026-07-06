@@ -40,6 +40,9 @@
     humanQA: [],                 // 本人真实问答样本 [{q,a,ts}]，喂给 AI 学你的风格（最多200，持久化）
     botSending: false,           // 机器人正在发送（让"本人回复"监听忽略这次）
     humanWatchBound: false,      // 手动回复监听是否已绑定
+    lastUserActivity: 0,         // 最近一次"真人"在页面上操作的时间（只认 isTrusted 事件）
+    lastDeferLogAt: 0,           // "暂缓自动回复"日志节流
+    lastDeferNoticeAt: 0,        // "暂缓自动发货"通知节流
     timer: null
   };
 
@@ -358,6 +361,35 @@
       const btn = e.target && e.target.closest && e.target.closest('button');
       if (btn && btn.textContent.replace(/\s/g, '') === '发送') markHumanReply();
     }, true);
+  }
+
+  // ---------- 真人活动检测（你在操作工作台时，机器人不抢屏切会话）----------
+
+  /**
+   * 只认 isTrusted 的真实输入事件——机器人程序化 el.click() / dispatchEvent
+   * 产生的事件 isTrusted=false，不会把机器人自己误判成"你在操作"。
+   */
+  function bindActivityWatch() {
+    const mark = (e) => { if (e.isTrusted) state.lastUserActivity = Date.now(); };
+    for (const t of ['mousemove', 'mousedown', 'keydown', 'wheel', 'touchstart']) {
+      document.addEventListener(t, mark, { capture: true, passive: true });
+    }
+  }
+
+  /**
+   * 你最近是否在亲自操作工作台（默认 60 秒内有过输入）。
+   * 期间机器人不点开任何别的会话（自动回复他人/发货定位都会抢走你正看的聊天框），
+   * 等你停手约 1 分钟后自动恢复处理，一条不漏。
+   * settings.pauseWhenUserActive=false 可关闭；userIdleSeconds 可调空闲判定秒数。
+   */
+  function userActive() {
+    if (state.settings && state.settings.pauseWhenUserActive === false) return false;
+    // 最强保护：输入框里有没发出去的字 = 你正在打字，绝不切走（不受计时影响）
+    const ta = document.querySelector(state.S.inputBox);
+    if (ta && ta.value && ta.value.trim()) return true;
+    const idle = Number(state.settings && state.settings.userIdleSeconds);
+    const win = (Number.isFinite(idle) && idle > 0 ? idle : 60) * 1000;
+    return Date.now() - state.lastUserActivity < win;
   }
 
   /** 本人是否在接管窗口内手动回复过该会话（机器人应让位） */
@@ -1019,16 +1051,44 @@
       // 保证"只回复启用之后的新消息"，不翻旧账（买家再发新消息后 lastMsg 变化即恢复处理）
       const convs = scanConvList().filter(c =>
         c.unread && !isMuted(c.key) && state.baseline.get(c.key) !== c.lastMsg);
-      for (const conv of convs) {
-        await handleConversation(conv);
-        await sleep(rand(1000, 2000));
+      if (convs.length && userActive()) {
+        // 你正在亲自操作工作台：处理这些会话要点开它们、会抢走你正看的聊天框。
+        // 暂缓，等你停手约1分钟后自动继续（未读红点还在，不会漏）
+        if (Date.now() - state.lastDeferLogAt > 60000) {
+          state.lastDeferLogAt = Date.now();
+          log('info', `你正在操作工作台，${convs.length} 个未读会话暂缓自动回复（停手约1分钟后自动继续）`);
+        }
+      } else {
+        for (const conv of convs) {
+          await handleConversation(conv);
+          await sleep(rand(1000, 2000));
+        }
       }
       // 1b) 兜底：当前"打开着"的会话里买家发新消息不会产生未读（开着=自动已读），
       // 直接读当前聊天窗判断，无需点击。签名去重防止重复回复。
-      await checkActiveConversation();
+      // 你在操作时也让位：别在你正处理这个客户时插一句自动回复搅局
+      if (!userActive()) await checkActiveConversation();
       // 2) 自动发货：接口驱动，独立于会话扫描（默认开启，可在设置关闭）
+      // 发货要点开买家会话（会切走你正看的窗口）→ 你在操作时暂缓，但弹通知提醒
+      // （买家已付款，别漏发；你可直接点📦手动发，或停手后自动补发）
       if (state.settings.autoDeliver !== false) {
-        await deliveryPass();
+        if (userActive()) {
+          if (Date.now() - state.lastDeferNoticeAt > 120000) {
+            state.lastDeferNoticeAt = Date.now();
+            // 只在确实有待发货订单时才提醒，避免空扰
+            try {
+              const orders = await bridge.call('fetchWaitShipOrders');
+              const waiting = (Array.isArray(orders) ? orders : []).filter(o =>
+                o.orderStatus === '待发货' && !o.inRefund && !state.deliveredOrders[o.orderId]);
+              if (waiting.length) {
+                notify('📦 有待发货订单（已暂缓）', `你正在操作工作台，${waiting.length} 个已付款订单暂缓自动发货。可点绿色「发货」按钮手动发，或停手约1分钟后自动发。`);
+                log('warn', `你在操作中，${waiting.length} 个待发货订单暂缓自动发货（停手后自动继续）`);
+              }
+            } catch (_) { /* 拉单失败就下轮再说 */ }
+          }
+        } else {
+          await deliveryPass();
+        }
       }
     } catch (e) {
       const m = String(e && e.message || e);
@@ -1393,6 +1453,7 @@
     //   · 手动发货按钮：给当前会话买家发货（点击时才做权威订单核对+去重）
     setInterval(() => { updateMuteButton(); updateDeliverButton(); }, 1000);
     bindHumanReplyWatch(); // 监听你的手动发送，机器人据此让位
+    bindActivityWatch();   // 监听你的鼠标/键盘，你在操作时机器人不抢屏切会话
     keepAlivePort();       // 常连接，降低后台被冻结的概率
     // 掉线守护心跳：只要工作台页面开着就持续上报，页面关闭/登出后心跳自然停止
     heartbeat();

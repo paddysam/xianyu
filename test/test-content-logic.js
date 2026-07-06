@@ -218,11 +218,11 @@ console.log('\n[C] consumeCard 扣库存');
   fakeInputValue = '   ';
   ok('输入框只有空白 → 不算草稿', !F.userActive());
   fakeInputValue = '';
-  // 刚动过（10 秒前）→ 忙；很久前（超过 60 秒）→ 不忙
-  sandbox.state.lastUserActivity = now - 10000;
-  ok('10秒前动过 → 忙（默认60秒窗口内）', F.userActive());
-  sandbox.state.lastUserActivity = now - 70000;
-  ok('70秒前动过 → 不忙（超过60秒，自动恢复）', !F.userActive());
+  // 刚动过（3 秒前）→ 忙；停手超过 8 秒 → 不忙（窗口短，恢复快，不拖慢回复）
+  sandbox.state.lastUserActivity = now - 3000;
+  ok('3秒前动过 → 忙（默认8秒窗口内）', F.userActive());
+  sandbox.state.lastUserActivity = now - 12000;
+  ok('12秒前动过 → 不忙（超过8秒，快速恢复自动回复）', !F.userActive());
   // 开关关掉 → 永远不忙（机器人照常抢，回到旧行为）
   sandbox.state.settings = { pauseWhenUserActive: false };
   sandbox.state.lastUserActivity = now;

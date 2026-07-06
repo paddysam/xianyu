@@ -35,6 +35,8 @@
       deleteProduct: (id) => req('DELETE', '/api/products/' + id),
       listCards: (id) => req('GET', '/api/products/' + id + '/cards'),
       restock: (id, cards) => req('POST', '/api/products/' + id + '/cards', { cards }),
+      // 标记某张卡已手动发货：从库存移除（置 used），机器人不会再自动发它
+      manualDeliverCard: (id, cardId) => req('POST', '/api/products/' + id + '/cards/' + cardId + '/manual'),
       deliver: (order) => req('POST', '/api/deliver', order),
       rollbackDeliver: (orderId) => req('POST', '/api/deliver/rollback', { orderId }),
       listDeliveries: (limit) => req('GET', '/api/deliveries?limit=' + (limit || 200)),

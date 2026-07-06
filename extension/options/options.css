@@ -283,6 +283,25 @@ label.check input:focus-visible + .toggle { box-shadow: var(--ring); }
   .stock-detail { grid-template-columns: 1fr; }
 }
 
+/* 库存卡密逐条列表（每张带「已手动发货·移除」） */
+.sd-card-list {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 200px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px;
+  background: #fff;
+}
+.sd-card-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 6px; border-radius: 6px;
+}
+.sd-card-row:hover { background: var(--bg); }
+.sd-card-text {
+  flex: 1; min-width: 0;
+  word-break: break-all; line-height: 1.4;
+}
+.sd-del-card { flex: none; white-space: nowrap; }
+.sd-del-card:hover { background: #fdecea; }
+
 /* ============ 状态文字 ============ */
 #saveResult, #testResult { font-size: .8125rem; color: var(--success); }
 #saveResult.err, #testResult.err { color: var(--danger); }

@@ -409,17 +409,36 @@ function renderStock() {
 
     let detail = '';
     if (expanded) {
-      const poolCardsText = backendMode
-        ? (p._cards ? p._cards.join('\n') : '加载中…')
-        : (p.cards || []).join('\n');
-      const cardsText = isPool ? poolCardsText : (p.delivery || '（发货内容在「商品发货」页配置）');
+      // 卡密库存：每张一行，带「已手动发货·移除」按钮（你在别处手动发了某张卡时点它，扣掉库存防止重复自动发）
+      let cardListHtml = '';
+      if (isPool) {
+        if (backendMode) {
+          if (p._cardsErr) cardListHtml = `<div class="stock-empty">读取失败：${escapeHtml(p._cardsErr)}</div>`;
+          else if (!p._cards) cardListHtml = '<div class="stock-empty">加载中…</div>';
+          else if (!p._cards.length) cardListHtml = '<div class="stock-empty">（暂无在库卡密，去右侧补货）</div>';
+          else cardListHtml = p._cards.map(c =>
+            `<div class="sd-card-row">
+               <span class="mono sd-card-text">${escapeHtml(c.secret)}</span>
+               <button class="link-btn sd-del-card" data-i="${i}" data-cid="${c.id}" style="color:#c0392b">已手动发货·移除</button>
+             </div>`).join('');
+        } else {
+          const cards = (p.cards || []).map((sec, ci) => ({ sec, ci })).filter(x => x.sec && x.sec.trim());
+          if (!cards.length) cardListHtml = '<div class="stock-empty">（暂无在库卡密，去右侧补货）</div>';
+          else cardListHtml = cards.map(x =>
+            `<div class="sd-card-row">
+               <span class="mono sd-card-text">${escapeHtml(x.sec)}</span>
+               <button class="link-btn sd-del-card" data-i="${i}" data-ci="${x.ci}" style="color:#c0392b">已手动发货·移除</button>
+             </div>`).join('');
+        }
+      }
       detail = `
         <tr class="stock-detail-row"><td colspan="6">
           <div class="stock-detail">
             <div class="sd-block">
-              <label>${isPool ? '当前库存卡密（只读，一行一条）' : '发货内容（只读）'}
-                <textarea rows="4" readonly class="mono">${escapeHtml(cardsText || '（空）')}</textarea>
-              </label>
+              <label>${isPool ? '当前库存卡密（点「已手动发货·移除」扣掉你在别处手动发出的那张）' : '发货内容（只读）'}</label>
+              ${isPool
+                ? `<div class="sd-card-list">${cardListHtml}</div>`
+                : `<textarea rows="4" readonly class="mono">${escapeHtml(p.delivery || '（发货内容在「商品发货」页配置）')}</textarea>`}
             </div>
             ${isPool ? `
             <div class="sd-block">
@@ -469,12 +488,37 @@ function renderStock() {
     if (opening && backendMode && typeof products[i].id === 'number' && (products[i].mode || 'pool') === 'pool' && !products[i]._cards) {
       try {
         const r = await backend.listCards(products[i].id);
-        products[i]._cards = (r.cards || []).map(c => c.secret);
+        // 保留卡 id（移除时按 id 精确删，避免删错同名/相似卡）
+        products[i]._cards = (r.cards || []).map(c => ({ id: c.id, secret: c.secret }));
+        products[i]._cardsErr = null;
       } catch (e) {
-        products[i]._cards = ['（读取失败：' + e.message + '）'];
+        products[i]._cardsErr = e.message;
       }
       if (stockExpanded.has(i)) renderStock();
     }
+  }));
+
+  // 「已手动发货·移除」：把某张卡从库存扣掉（后端置 used / 本地删数组），机器人不会再自动发它
+  box.querySelectorAll('.sd-del-card').forEach(b => b.addEventListener('click', async () => {
+    const i = Number(b.dataset.i);
+    const p = products[i];
+    if (!confirm('确认这张卡已经手动发出、从库存移除？\n移除后机器人不会再把它自动发给别人（此操作不可撤销）。')) return;
+    if (backendMode) {
+      const cid = Number(b.dataset.cid);
+      try {
+        const r = await backend.manualDeliverCard(p.id, cid);
+        if (r.status === 'notFound') { alert('这张卡在数据库里已不存在，可能已被移除。刷新一下即可。'); }
+      } catch (e) { alert('移除失败：' + e.message); return; }
+      p._cards = (p._cards || []).filter(c => c.id !== cid);
+      p.stock = Math.max(0, (p.stock || 0) - 1);
+      p.sold = (p.sold || 0) + 1;
+    } else {
+      const ci = Number(b.dataset.ci);
+      p.cards = (p.cards || []).filter((_, idx) => idx !== ci);
+      await chrome.storage.local.set({ products });
+    }
+    renderStock();
+    renderProds();
   }));
   box.querySelectorAll('.sd-restock-btn').forEach(b => b.addEventListener('click', async () => {
     const i = Number(b.dataset.i);

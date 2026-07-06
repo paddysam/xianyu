@@ -97,6 +97,38 @@ app.post('/api/products/:id/cards', wrap(async (req, res) => {
   res.json({ ok: true, added: list.length });
 }));
 
+/**
+ * 标记某张卡"已手动发货"：你在别处手动发了这张卡时用。
+ * 事务内把该卡置为 used（从可用库存移除，机器人不会再自动发它），
+ * 并记一笔发货（order_id = MANUAL-card<卡id>，唯一，重复点幂等），让"累计已发"准确。
+ * 返回 status: removed / alreadyUsed / notFound
+ */
+app.post('/api/products/:id/cards/:cardId/manual', wrap(async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.query(
+      `SELECT c.id, c.secret, c.status, p.match_title, p.spec, p.price
+       FROM cards c JOIN products p ON p.id = c.product_id
+       WHERE c.id = ? AND c.product_id = ? FOR UPDATE`,
+      [req.params.cardId, req.params.id]);
+    if (!rows.length) { await conn.commit(); return res.json({ ok: true, status: 'notFound' }); }
+    const card = rows[0];
+    if (card.status !== 'available') { await conn.commit(); return res.json({ ok: true, status: 'alreadyUsed' }); }
+    const manualOrder = 'MANUAL-card' + card.id;
+    await conn.query(
+      `UPDATE cards SET status='used', used_order_id=?, used_at=NOW() WHERE id=?`,
+      [manualOrder, card.id]);
+    // INSERT IGNORE：order_id 唯一，重复点同一张不会重复记
+    await conn.query(
+      `INSERT IGNORE INTO deliveries (order_id, product_id, card_id, title, spec, price, buyer, content)
+       VALUES (?,?,?,?,?,?,?,?)`,
+      [manualOrder, req.params.id, card.id, card.match_title || '', card.spec || '', card.price || '', '手动发货', card.secret]);
+    await conn.commit();
+    res.json({ ok: true, status: 'removed' });
+  } catch (e) { await conn.rollback(); throw e; } finally { conn.release(); }
+}));
+
 // ---------- 发货（原子）----------
 /**
  * body: { orderId, title, spec, price, buyer, template }

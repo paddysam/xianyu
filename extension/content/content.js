@@ -1472,7 +1472,7 @@
       b = document.createElement('div');
       b.id = '__xy_tg_btn';
       b.style.cssText =
-        'position:fixed;right:16px;bottom:136px;z-index:99999;padding:7px 14px;' +
+        'position:fixed;right:16px;bottom:96px;z-index:99999;padding:7px 14px;' +
         'border-radius:18px;font-size:12px;font-weight:600;cursor:pointer;user-select:none;' +
         'font-family:"Segoe UI","Microsoft YaHei",sans-serif;' +
         'box-shadow:0 2px 10px rgba(0,0,0,.18);border:1px solid rgba(0,0,0,.06);';
@@ -1523,7 +1523,7 @@
       b = document.createElement('div');
       b.id = '__xy_autodeliver_btn';
       b.style.cssText =
-        'position:fixed;right:16px;bottom:176px;z-index:99999;padding:7px 14px;' +
+        'position:fixed;right:16px;bottom:136px;z-index:99999;padding:7px 14px;' +
         'border-radius:18px;font-size:12px;font-weight:600;cursor:pointer;user-select:none;' +
         'font-family:"Segoe UI","Microsoft YaHei",sans-serif;' +
         'box-shadow:0 2px 10px rgba(0,0,0,.18);border:1px solid rgba(0,0,0,.06);';
@@ -1662,7 +1662,7 @@
       b = document.createElement('div');
       b.id = '__xy_deliver_btn';
       b.style.cssText =
-        'position:fixed;right:16px;bottom:96px;z-index:99999;padding:8px 16px;' +
+        'position:fixed;right:16px;bottom:176px;z-index:99999;padding:8px 16px;' +
         'border-radius:18px;font-size:12px;font-weight:700;cursor:pointer;user-select:none;' +
         'font-family:"Segoe UI","Microsoft YaHei",sans-serif;background:#16a34a;color:#fff;' +
         'box-shadow:0 2px 10px rgba(22,163,74,.35);';

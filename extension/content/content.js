@@ -1461,6 +1461,53 @@
     }
   }
 
+  // ---------- 自动发货独立开关（与"机器人回复"、"飞机推送"互不影响）----------
+
+  async function onAutoDeliverToggle() {
+    if (!extAlive()) {
+      markZombie();
+      alert('插件刚更新过，本页面脚本已断线，请按 F5 刷新后再操作。');
+      return;
+    }
+    try {
+      const { settings = {} } = await chrome.storage.local.get('settings');
+      settings.autoDeliver = settings.autoDeliver === false; // 取反
+      await chrome.storage.local.set({ settings });
+      state.settings.autoDeliver = settings.autoDeliver;
+      updateAutoDeliverButton();
+      log('warn', settings.autoDeliver
+        ? '自动发货已开启：付款订单将自动发卡'
+        : '自动发货已关闭：来单只推送提醒，需你点绿色「发货」按钮手动发（注意别超时）');
+    } catch (e) {
+      alert('保存失败：' + (e && e.message));
+    }
+  }
+
+  function updateAutoDeliverButton() {
+    if (!state.S) return;
+    let b = document.getElementById('__xy_autodeliver_btn');
+    if (!b) {
+      b = document.createElement('div');
+      b.id = '__xy_autodeliver_btn';
+      b.style.cssText =
+        'position:fixed;right:16px;bottom:176px;z-index:99999;padding:7px 14px;' +
+        'border-radius:18px;font-size:12px;font-weight:600;cursor:pointer;user-select:none;' +
+        'font-family:"Segoe UI","Microsoft YaHei",sans-serif;' +
+        'box-shadow:0 2px 10px rgba(0,0,0,.18);border:1px solid rgba(0,0,0,.06);';
+      b.addEventListener('click', onAutoDeliverToggle);
+      document.body.appendChild(b);
+    }
+    if (state.settings.autoDeliver !== false) {
+      b.style.background = '#f0fdf4'; b.style.color = '#15803d';
+      b.textContent = '🚚 自动发货：开';
+      b.title = '付款订单自动发卡。点击关闭（改为手动点📦发货，飞机推送不受影响）';
+    } else {
+      b.style.background = '#fff7ed'; b.style.color = '#b45309';
+      b.textContent = '🚚 自动发货：关 · 点此开启';
+      b.title = '当前只推送提醒不自动发卡，需手动点📦发货（注意发货时效，超时会被退款）';
+    }
+  }
+
   // ---------- 手动发货按钮（给当前打开会话的买家发货）----------
 
   /**
@@ -1606,7 +1653,7 @@
     // 聊天页两个按钮随你切换会话实时刷新（都独立于助手开关）：
     //   · 免打扰按钮：反映当前会话是否已停用机器人
     //   · 手动发货按钮：给当前会话买家发货（点击时才做权威订单核对+去重）
-    setInterval(() => { updateMuteButton(); updateDeliverButton(); updateTgButton(); }, 1000);
+    setInterval(() => { updateMuteButton(); updateDeliverButton(); updateTgButton(); updateAutoDeliverButton(); }, 1000);
     bindHumanReplyWatch(); // 监听你的手动发送，机器人据此让位
     bindActivityWatch();   // 监听你的鼠标/键盘，你在操作时机器人不抢屏切会话
     keepAlivePort();       // 常连接，降低后台被冻结的概率

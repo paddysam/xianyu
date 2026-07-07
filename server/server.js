@@ -361,10 +361,13 @@ async function tgRestockPicker() {
     SELECT p.*, (SELECT COUNT(*) FROM cards c WHERE c.product_id=p.id AND c.status='available') AS stock
     FROM products p WHERE p.mode='pool' ORDER BY p.id`);
   if (!rows.length) return tgReply('没有卡密类商品可补货（固定内容商品不需要库存）。');
-  return tgReply('给哪个商品补货？点按钮选择：', rows.map(p => ([{
-    text: `#${p.id} ${p.match_title}${p.spec ? '/' + p.spec : ''} ¥${p.price || '?'} · 在库${p.stock}`,
-    callback_data: 'pick:' + p.id
-  }])));
+  return tgReply('给哪个商品补货？点按钮选择：', [
+    ...rows.map(p => ([{
+      text: `#${p.id} ${p.match_title}${p.spec ? '/' + p.spec : ''} ¥${p.price || '?'} · 在库${p.stock}`,
+      callback_data: 'pick:' + p.id
+    }])),
+    [{ text: '❌ 取消', callback_data: 'cancel' }]
+  ]);
 }
 
 // 补货会话状态（单店主，一个状态足够；15 分钟不动作自动过期）
@@ -387,7 +390,8 @@ async function tgHandleCallback(cb) {
     const p = rows[0];
     const label = `#${p.id} ${p.match_title}${p.spec ? ' / ' + p.spec : ''} ¥${p.price || '?'}`;
     tgPending = { stage: 'await_cards', productId: p.id, label, cards: [], ts: Date.now() };
-    return tgReply(`好，给「${label}」补货。\n\n现在把卡密发给我：一条消息里每行一张。\n（发「取消」可退出）`);
+    return tgReply(`好，给「${label}」补货。\n\n现在把卡密发给我：一条消息里每行一张。`,
+      [[{ text: '❌ 取消补货', callback_data: 'cancel' }]]);
   }
   if (data === 'confirm') {
     if (!tgPendingFresh() || tgPending.stage !== 'await_confirm') { tgPending = null; return tgReply('这次补货已过期或已处理，重新点「➕ 补货」来一次。'); }
@@ -411,7 +415,8 @@ async function tgHandleText(text) {
   // 补货第二步：正在等卡密 → 这条消息的每一行都是一张卡，回显预览等确认
   if (tgPendingFresh() && tgPending.stage === 'await_cards') {
     const cards = raw.split('\n').map(s => s.trim()).filter(Boolean);
-    if (!cards.length) return tgReply('没读到内容，每行一张卡密再发一次，或发「取消」退出。');
+    if (!cards.length) return tgReply('没读到内容，每行一张卡密再发一次。',
+      [[{ text: '❌ 取消补货', callback_data: 'cancel' }]]);
     // 查重：同商品库里已有完全相同的卡密 → 提醒（防手滑重复粘贴）
     const [dups] = await pool.query(
       `SELECT secret FROM cards WHERE product_id=? AND secret IN (?)`,

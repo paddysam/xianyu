@@ -326,14 +326,17 @@ app.get('/api/deliver-commands', wrap(async (req, res) => {
 app.post('/api/deliver-commands/:orderId/resolve', wrap(async (req, res) => {
   const { status = 'done', result = '' } = req.body || {};
   const st = status === 'done' ? 'done' : 'failed';
+  // 只处理确实存在、且还没结算过的指令——查无此单/已结算则静默，不误推飞机
+  const [[cmd]] = await pool.query(
+    'SELECT buyer, title, spec, status FROM deliver_commands WHERE order_id=?', [req.params.orderId]);
+  if (!cmd) return res.json({ ok: true, ignored: 'no such command' });
+  if (cmd.status !== 'pending') return res.json({ ok: true, ignored: 'already resolved' });
   await pool.query(
     'UPDATE deliver_commands SET status=?, result=? WHERE order_id=?',
     [st, String(result).slice(0, 250), req.params.orderId]);
   // 结果回推飞机（配了 TG 才发）
   if (TG_TOKEN && TG_CHAT) {
-    const [[cmd]] = await pool.query(
-      'SELECT buyer, title, spec FROM deliver_commands WHERE order_id=?', [req.params.orderId]);
-    const who = cmd ? `${cmd.buyer}「${cmd.title}${cmd.spec ? '/' + cmd.spec : ''}」` : req.params.orderId;
+    const who = `${cmd.buyer || ''}「${cmd.title || ''}${cmd.spec ? '/' + cmd.spec : ''}」`;
     tgReply(st === 'done' ? `✅ 远程发货成功：${who}` : `⚠️ 远程发货未成功：${who}\n${result || ''}\n可回电脑手动发`);
   }
   res.json({ ok: true });

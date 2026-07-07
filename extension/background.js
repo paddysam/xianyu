@@ -36,7 +36,8 @@ const DEFAULT_SETTINGS = {
   humanTakeoverMinutes: 10,     // 本人手动回复某会话后，这段时间内机器人不打扰（0=关闭该逻辑）
   replyDelayMinMs: 2000,        // 模拟人工：回复前随机延迟
   replyDelayMaxMs: 6000,
-  pollIntervalMs: 5000,         // 扫描未读会话的间隔
+  pollIntervalMs: 60000,        // 轮询间隔：扫未读会话 + 拉订单（自动发货/推送的信息源）。
+                                // 60秒足够（手动发货为主时推送慢一会无所谓），也大幅降低接口压力
   pauseWhenUserActive: true,    // 你正在操作工作台时，机器人不切走你正看的会话（输入框有草稿时绝不切）
   userIdleSeconds: 8,           // 停手几秒后判定"你已离手"，机器人恢复处理（越小恢复越快）
   maxRepliesPerConvPerHour: 10, // 防刷屏/防对轰
@@ -75,6 +76,11 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (cur.settings && cur.settings.replyEnabled === undefined) {
     settings.replyEnabled = cur.settings.enabled === true;
     settings.enabled = true;
+  }
+  // 轮询间隔：还停在旧默认(5秒)或没设的 → 升到 60 秒（降低订单接口压力）。
+  // 只动"旧默认值"，不覆盖你手动调过的其它值
+  if (!cur.settings || !cur.settings.pollIntervalMs || Number(cur.settings.pollIntervalMs) <= 5000) {
+    settings.pollIntervalMs = 60000;
   }
   await chrome.storage.local.set({
     settings,

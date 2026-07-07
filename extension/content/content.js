@@ -614,8 +614,20 @@
     }
   }
 
-  /** 推送一条 Telegram（后台代发，未配置时后台会静默跳过） */
+  /** Telegram 是否已配置（token+chatId 都填了） */
+  function tgConfigured() {
+    const s = state.settings || {};
+    return !!((s.tgBotToken || '').trim() && String(s.tgChatId || '').trim());
+  }
+
+  /** 飞机推送当前是否开启（已配置 + 开关没关；开关独立于机器人回复总开关） */
+  function tgPushOn() {
+    return tgConfigured() && (state.settings || {}).tgPushEnabled !== false;
+  }
+
+  /** 推送一条 Telegram（后台代发；推送开关关闭或未配置时不发） */
   function tgPush(text) {
+    if (!tgPushOn()) return;
     try { chrome.runtime.sendMessage({ type: 'TG_PUSH', text }, () => { void chrome.runtime.lastError; }); } catch (_) {}
   }
 
@@ -636,11 +648,17 @@
   // ---------- 接口驱动的自动发货 ----------
 
   /**
-   * 一轮发货：拉「待发货」订单 → 逐单校验 → 定位会话 → 发货。
+   * 一轮订单监控：拉「待发货」订单 → 推送新单到 Telegram → 逐单自动发货。
+   * 独立于"机器人回复"总开关：关了回复，发货/推送照常。
+   *   - 推送（tgPushOn）：不碰页面，你在操作时也照推；
+   *   - 自动发货（settings.autoDeliver）：要切会话，你在操作时暂缓。
    * 状态判断全部来自交易接口，不依赖页面标签。任何不确定都跳过等人工。
    */
   async function deliveryPass() {
     if (state.deliverBusy) return;
+    const wantPush = tgPushOn();
+    const wantDeliver = state.settings.autoDeliver !== false;
+    if (!wantPush && !wantDeliver) return;
     state.deliverBusy = true;
     try {
       let orders;
@@ -651,7 +669,22 @@
         return;
       }
       if (!Array.isArray(orders) || !orders.length) return;
-      await tgNotifyNewOrders(orders);   // 新付款订单先推 Telegram（每单一次）
+      if (wantPush) await tgNotifyNewOrders(orders);   // 新付款订单先推 Telegram（每单一次，不碰界面）
+
+      if (!wantDeliver) return;   // 只要推送不要自动发货（全手动模式）：到此为止
+      // 自动发货要点开买家会话（会切走你正看的窗口）→ 你在操作时暂缓并提醒
+      if (userActive()) {
+        if (Date.now() - state.lastDeferNoticeAt > 120000) {
+          const waiting = orders.filter(o =>
+            o.orderStatus === '待发货' && !o.inRefund && !state.deliveredOrders[o.orderId]);
+          if (waiting.length) {
+            state.lastDeferNoticeAt = Date.now();
+            notify('📦 有待发货订单（已暂缓）', `你正在操作工作台，${waiting.length} 个已付款订单暂缓自动发货。可点绿色「发货」按钮手动发，或停手几秒后自动发。`);
+            log('warn', `你在操作中，${waiting.length} 个待发货订单暂缓自动发货（停手后自动继续）`);
+          }
+        }
+        return;
+      }
 
       for (const order of orders) {
         // —— 逐层硬校验，任一不满足就跳过 ——
@@ -1075,10 +1108,13 @@
   async function tick() {
     // deliverBusy 也要挡：手动发货按钮点击后会在当前会话里 sleep 几秒再发送，
     // 这几秒内若买家追加消息，tick() 的自动回复不能跟手动发货抢同一个输入框
-    // （两边都没有对方感知的锁，同时 sendReply 会互相覆盖写入内容）
-    if (!state.running || state.busy || state.deliverBusy) return;
+    // （两边都没有对方感知的锁，同时 sendReply 会互相覆盖写入内容）。
+    // 注意：tick 本身常驻运行——"机器人回复"由 state.running 在下面分段控制，
+    // 订单监控（自动发货+飞机推送）独立于回复开关。
+    if (state.busy || state.deliverBusy) return;
     state.busy = true;
     try {
+      if (state.running) {
       // 1) 自动回复：只处理"有未读红点"的会话。
       // 未读红点 = 买家发来我还没看的新消息，这是唯一可靠信号：
       // 系统消息（确认收货）、评价卡、自己发的消息都不会产生未读 → 不会被点开，
@@ -1111,29 +1147,11 @@
       // 这条不切换窗口（就在你当前会话里回），不需要为"防抢屏"暂缓；
       // 你正在打字时 sendReply 的草稿保护会拦住，不会覆盖你的输入。
       await checkActiveConversation();
-      // 2) 自动发货：接口驱动，独立于会话扫描（默认开启，可在设置关闭）
-      // 发货要点开买家会话（会切走你正看的窗口）→ 你在操作时暂缓，但弹通知提醒
-      // （买家已付款，别漏发；你可直接点📦手动发，或停手后自动补发）
-      if (state.settings.autoDeliver !== false) {
-        if (userActive()) {
-          if (Date.now() - state.lastDeferNoticeAt > 120000) {
-            state.lastDeferNoticeAt = Date.now();
-            // 只在确实有待发货订单时才提醒，避免空扰
-            try {
-              const orders = await bridge.call('fetchWaitShipOrders');
-              await tgNotifyNewOrders(orders);   // 暂缓期间发现的新单也要推 Telegram
-              const waiting = (Array.isArray(orders) ? orders : []).filter(o =>
-                o.orderStatus === '待发货' && !o.inRefund && !state.deliveredOrders[o.orderId]);
-              if (waiting.length) {
-                notify('📦 有待发货订单（已暂缓）', `你正在操作工作台，${waiting.length} 个已付款订单暂缓自动发货。可点绿色「发货」按钮手动发，或停手几秒后自动发。`);
-                log('warn', `你在操作中，${waiting.length} 个待发货订单暂缓自动发货（停手后自动继续）`);
-              }
-            } catch (_) { /* 拉单失败就下轮再说 */ }
-          }
-        } else {
-          await deliveryPass();
-        }
-      }
+      } // ← 以上"机器人回复"部分受总开关(state.running)控制
+
+      // 2) 订单监控：自动发货 + 飞机推送，独立于回复开关（内部各有自己的开关与
+      // "你在操作时暂缓"逻辑，见 deliveryPass 注释）
+      await deliveryPass();
     } catch (e) {
       const m = String(e && e.message || e);
       // 扩展被重载后本页老脚本已失效：chrome API 全部抛此错，tick 永远跑不完，
@@ -1204,6 +1222,7 @@
     }
   }
 
+  /** 开启"机器人回复"（订单监控/发货/推送由常驻 tick 独立负责，不在这里管） */
   async function start() {
     await loadConfig();
     if (!state.settings.enabled) return;
@@ -1214,16 +1233,14 @@
     const cur = activeConvSig();
     state.activeSig = cur ? cur.sig : null;
     state.running = true;
-    state.timer = setInterval(tick, state.settings.pollIntervalMs || 5000);
-    log('info', `助手已启动，监控 ${state.baseline.size} 个会话`);
+    log('info', `机器人回复已开启，监控 ${state.baseline.size} 个会话（自动发货/飞机推送独立运行）`);
     mountBadge();
   }
 
+  /** 关闭"机器人回复"。注意：不停 tick 定时器——自动发货和飞机推送继续工作 */
   function stop() {
     state.running = false;
-    if (state.timer) clearInterval(state.timer);
-    state.timer = null;
-    log('info', '助手已停止');
+    log('info', '机器人回复已关闭（自动发货/飞机推送不受影响，仍在运行）');
     mountBadge();
   }
 
@@ -1235,9 +1252,10 @@
         .catch(e => sendResponse({ ok: false, error: String(e && e.message || e) }));
       return true; // 异步
     }
-    // 后台定时"戳"：标签在后台被浏览器节流时，靠后台 SW 驱动强制跑一轮
+    // 后台定时"戳"：标签在后台被浏览器节流时，靠后台 SW 驱动强制跑一轮。
+    // 不看 running——回复关着时订单监控（发货/推送）也要被戳活
     if (msg && msg.type === 'TICK_NOW') {
-      if (state.running && !state.busy) tick();
+      if (!state.busy) tick();
       sendResponse({ ok: true });
       return;
     }
@@ -1312,18 +1330,19 @@
     }
     const dot = document.getElementById('__xy_assistant_dot');
     const txt = document.getElementById('__xy_assistant_txt');
+    b.title = '点击开启/关闭机器人自动回复（不影响自动发货和飞机推送）';
     if (state.running) {
       b.style.background = '#f0fdf4';
       b.style.color = '#15803d';
       dot.style.background = '#16a34a';
       dot.style.boxShadow = '0 0 0 3px rgba(22,163,74,.2)';
-      txt.textContent = '自动客服运行中（点此关闭）';
+      txt.textContent = '机器人回复：开（点此关闭）';
     } else {
       b.style.background = '#fff';
       b.style.color = '#6b7280';
       dot.style.background = '#9ca3af';
       dot.style.boxShadow = 'none';
-      txt.textContent = '已停止 · 点此开启';
+      txt.textContent = '机器人回复：关 · 点此开启';
     }
   }
 
@@ -1385,6 +1404,59 @@
     } else {
       b.style.background = '#fff'; b.style.color = '#374151';
       b.textContent = `🔕 对「${who}」停用机器人`;
+    }
+  }
+
+  // ---------- 飞机推送独立开关（与机器人回复完全无关）----------
+
+  async function onTgToggleClick() {
+    if (!extAlive()) {
+      markZombie();
+      alert('插件刚更新过，本页面脚本已断线，请按 F5 刷新后再操作。');
+      return;
+    }
+    if (!tgConfigured()) {
+      alert('还没配置 Telegram：\n插件设置页 → 高级 → 「Telegram 推送」里填 Bot Token 和 Chat ID，保存后这里就能一键开关。');
+      return;
+    }
+    try {
+      const { settings = {} } = await chrome.storage.local.get('settings');
+      settings.tgPushEnabled = settings.tgPushEnabled === false; // 取反：关→开 / 开→关
+      await chrome.storage.local.set({ settings });
+      state.settings.tgPushEnabled = settings.tgPushEnabled;
+      updateTgButton();
+      log('info', settings.tgPushEnabled ? '飞机推送已开启（有单/发货/告警都会推送）' : '飞机推送已关闭');
+    } catch (e) {
+      alert('保存失败：' + (e && e.message));
+    }
+  }
+
+  function updateTgButton() {
+    if (!state.S) return;
+    let b = document.getElementById('__xy_tg_btn');
+    if (!b) {
+      b = document.createElement('div');
+      b.id = '__xy_tg_btn';
+      b.style.cssText =
+        'position:fixed;right:16px;bottom:136px;z-index:99999;padding:7px 14px;' +
+        'border-radius:18px;font-size:12px;font-weight:600;cursor:pointer;user-select:none;' +
+        'font-family:"Segoe UI","Microsoft YaHei",sans-serif;' +
+        'box-shadow:0 2px 10px rgba(0,0,0,.18);border:1px solid rgba(0,0,0,.06);';
+      b.addEventListener('click', onTgToggleClick);
+      document.body.appendChild(b);
+    }
+    if (!tgConfigured()) {
+      b.style.background = '#fff'; b.style.color = '#9ca3af';
+      b.textContent = '📣 飞机推送：未配置';
+      b.title = '在插件设置页 → 高级 填 Bot Token / Chat ID 后即可使用';
+    } else if (tgPushOn()) {
+      b.style.background = '#eff6ff'; b.style.color = '#1d4ed8';
+      b.textContent = '📣 飞机推送：开';
+      b.title = '有单/发货/告警会推到你的 Telegram。点击关闭（与机器人回复开关互不影响）';
+    } else {
+      b.style.background = '#fff'; b.style.color = '#6b7280';
+      b.textContent = '📣 飞机推送：关 · 点此开启';
+      b.title = '点击开启 Telegram 推送（与机器人回复开关互不影响）';
     }
   }
 
@@ -1533,13 +1605,16 @@
     // 聊天页两个按钮随你切换会话实时刷新（都独立于助手开关）：
     //   · 免打扰按钮：反映当前会话是否已停用机器人
     //   · 手动发货按钮：给当前会话买家发货（点击时才做权威订单核对+去重）
-    setInterval(() => { updateMuteButton(); updateDeliverButton(); }, 1000);
+    setInterval(() => { updateMuteButton(); updateDeliverButton(); updateTgButton(); }, 1000);
     bindHumanReplyWatch(); // 监听你的手动发送，机器人据此让位
     bindActivityWatch();   // 监听你的鼠标/键盘，你在操作时机器人不抢屏切会话
     keepAlivePort();       // 常连接，降低后台被冻结的概率
     // 掉线守护心跳：只要工作台页面开着就持续上报，页面关闭/登出后心跳自然停止
     heartbeat();
     setInterval(heartbeat, 30000);
+    // 主循环常驻：订单监控（自动发货+飞机推送）只要页面开着就一直跑；
+    // "机器人回复"是否工作由 state.running（总开关）在 tick 内部分段控制
+    state.timer = setInterval(tick, Number(state.settings.pollIntervalMs) || 5000);
     if (state.settings.enabled) start();
   })();
 })();

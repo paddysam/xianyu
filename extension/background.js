@@ -49,6 +49,7 @@ const DEFAULT_SETTINGS = {
   // Telegram 推送：两项都填了才启用；只发给 tgChatId 这一个人（即你自己）
   tgBotToken: '',               // @BotFather 创建机器人给的 token
   tgChatId: '',                 // 你的账号 chat id（先给机器人发条消息才能拿到）
+  tgPushEnabled: true,          // 飞机推送开关（独立于机器人回复总开关，聊天页有悬浮按钮可切）
   deliveryDoneMark: '【自动发货】',
   // 全局发货话术模板：商品规则里没单独填模板时使用，{卡密} 为占位符
   deliveryTemplate:
@@ -126,12 +127,19 @@ chrome.runtime.onStartup.addListener(() => setTimeout(ensureWorkbenchTab, 4000))
  * 这样标签被关了也能在 1 分钟内自动挂回来，浏览器开着即可。
  */
 let ensuringTab = false; // 互斥：防止多个触发并发各开一个标签
+/** 回复/发货/推送任一在用，就值得保活与掉线守护（回复关了发货推送还要跑） */
+function anythingOn(settings) {
+  return !!(settings.enabled ||
+    settings.autoDeliver !== false ||
+    (settings.tgBotToken && settings.tgChatId && settings.tgPushEnabled !== false));
+}
+
 async function ensureWorkbenchTab() {
   if (ensuringTab) return;
   ensuringTab = true;
   try {
     const { settings = {} } = await chrome.storage.local.get('settings');
-    if (!settings.enabled || settings.keepTabAlive === false) return;
+    if (!anythingOn(settings) || settings.keepTabAlive === false) return;
     const tabs = await chrome.tabs.query({
       url: ['https://seller.goofish.com/*', 'https://www.goofish.com/im*']
     });
@@ -160,7 +168,7 @@ async function onHeartbeat() {
 async function checkOffline() {
   const { settings = {}, heartbeat, watchdog = {} } =
     await chrome.storage.local.get(['settings', 'heartbeat', 'watchdog']);
-  if (!settings.enabled) return; // 助手没开就不管
+  if (!anythingOn(settings)) return; // 回复/发货/推送全关着才不管
   const last = (heartbeat && heartbeat.ts) || 0;
   const stale = Date.now() - last > OFFLINE_THRESHOLD_MS;
   if (stale && !watchdog.warned) {
@@ -361,6 +369,7 @@ async function pushTelegram(text) {
   const token = (settings.tgBotToken || '').trim();
   const chatId = String(settings.tgChatId || '').trim();
   if (!token || !chatId) return { ok: false, error: '未配置 Telegram' };
+  if (settings.tgPushEnabled === false) return { ok: false, error: '飞机推送已关闭' };
   try {
     const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',

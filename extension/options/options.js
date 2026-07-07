@@ -672,7 +672,8 @@ $('testTg').addEventListener('click', async () => {
   res.textContent = '发送中…';
   // 用当前表单值临时存一份调用，测完还原（测试不等于保存）
   const { settings = {} } = await chrome.storage.local.get('settings');
-  const tmp = { ...settings, tgBotToken: token, tgChatId: chatId };
+  // 测试时临时强开推送开关（tgPushEnabled 可能被聊天页的悬浮按钮关着，测试不该被它挡）
+  const tmp = { ...settings, tgBotToken: token, tgChatId: chatId, tgPushEnabled: true };
   await chrome.storage.local.set({ settings: tmp });
   try {
     const r = await chrome.runtime.sendMessage({ type: 'TG_PUSH', text: '✅ 测试推送成功！\n闲鱼助手的订单提醒将发到这里。' });

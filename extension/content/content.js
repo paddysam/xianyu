@@ -33,6 +33,7 @@
     tgNotified: {},              // orderId -> ts 已推送过 Telegram"新订单"的单（持久化去重，防重复推）
     convLocateFail: {},          // orderId -> 连续"未定位到会话"次数（瞬时失败不告警，连续≥3轮才喊人工）
     manualAlertAt: {},           // orderId -> 上次"需人工"告警时间（同一订单30分钟内不重复喊）
+    remoteCmdTries: {},          // orderId -> 远程发货指令已尝试次数（瞬时失败重试几轮再判失败）
     humanHandoff: {},            // convKey -> ts 转人工接管中的会话（持久化）
     replyTimestamps: new Map(), // convKey -> [ts, ...] 用于限频
     deliverBusy: false,          // 发货流程互斥
@@ -627,20 +628,43 @@
     return tgConfigured() && (state.settings || {}).tgPushEnabled !== false;
   }
 
-  /** 推送一条 Telegram（后台代发；推送开关关闭或未配置时不发） */
-  function tgPush(text) {
+  /** 推送一条 Telegram（后台代发；推送开关关闭或未配置时不发）。
+   *  deliverOrderId 传了 → 消息带「发货」按钮（飞机上点即远程发货）。 */
+  function tgPush(text, deliverOrderId) {
     if (!tgPushOn()) return;
-    try { chrome.runtime.sendMessage({ type: 'TG_PUSH', text }, () => { void chrome.runtime.lastError; }); } catch (_) {}
+    try { chrome.runtime.sendMessage({ type: 'TG_PUSH', text, deliverOrderId }, () => { void chrome.runtime.lastError; }); } catch (_) {}
   }
 
-  /** 对刚发现的"新付款订单"推送 Telegram 提醒（每单只推一次，持久化去重） */
+  /** 查某订单对应商品的当前库存（后端模式查数据库快照，本地模式查内存规则）。
+   *  返回 {label, canDeliver}：label 用于推送展示，canDeliver=是否有货可发。 */
+  async function stockLineForOrder(order) {
+    const list = await getStockProducts();
+    const hits = (list || []).filter(p =>
+      p.match && order.title.includes(p.match) &&
+      (!p.spec || p.spec === order.spec) &&
+      (!p.price || String(p.price) === String(order.price)));
+    if (!hits.length) return { label: '库存：⚠️ 未配置发货规则，需人工', canDeliver: false };
+    const p = hits.sort((a, b) => ((b.spec ? 1 : 0) + (b.price ? 1 : 0)) - ((a.spec ? 1 : 0) + (a.price ? 1 : 0)))[0];
+    if (p.stock === null) return { label: '库存：固定内容（随时可发）', canDeliver: true };
+    if (p.stock > 0) return { label: `库存：${p.stock} 张 ✅`, canDeliver: true };
+    return { label: '库存：❌ 无货，需补货', canDeliver: false };
+  }
+
+  /** 对刚发现的"新付款订单"推送 Telegram 提醒（每单只推一次，持久化去重，带库存+发货按钮） */
   async function tgNotifyNewOrders(orders) {
     const fresh = (Array.isArray(orders) ? orders : []).filter(o =>
       o.orderStatus === '待发货' && !o.inRefund &&
       !state.deliveredOrders[o.orderId] && !state.tgNotified[o.orderId]);
     for (const o of fresh) {
       state.tgNotified[o.orderId] = Date.now();
-      tgPush(`🛒 新订单已付款\n买家：${o.buyerNick}\n商品：${o.title}${o.spec ? ' / ' + o.spec : ''}  ¥${o.price}\n订单号：${o.orderId}\n\n若可自动发货会随后提示"已发货"；缺货/需人工会单独提醒。`);
+      let stock = { label: '', canDeliver: true };
+      try { stock = await stockLineForOrder(o); } catch (_) {}
+      const tail = stock.canDeliver
+        ? '点下方「📦 发货」即可远程发货（电脑上的插件执行，约1分钟内）。'
+        : '⚠️ 当前发不了（缺货/需人工），请先补货或回电脑处理。';
+      tgPush(
+        `🛒 新订单已付款\n买家：${o.buyerNick}\n商品：${o.title}${o.spec ? ' / ' + o.spec : ''}  ¥${o.price}\n${stock.label}\n订单号：${o.orderId}\n\n${tail}`,
+        stock.canDeliver ? o.orderId : undefined);   // 有货才给发货按钮
     }
     if (fresh.length) {
       try { await chrome.storage.local.set({ tgNotified: state.tgNotified }); } catch (_) {}
@@ -664,6 +688,59 @@
     if (Date.now() - last > 30 * 60000) {
       state.manualAlertAt[order.orderId] = Date.now();
       notify('⚠️ 有单需人工发货', `未定位到买家 ${order.buyerNick} 的会话，「${order.title}」请手动发货`);
+    }
+  }
+
+  /**
+   * 处理"飞机远程发货指令"：你在 Telegram 点了「📦 发货」→ 服务器排了指令 →
+   * 这里取回来、走与本地发货完全相同的安全路径执行、把结果回写服务器（服务器再推飞机）。
+   * 独立于自动发货开关（这是你明确的远程指令）。瞬时失败(会话没定位到等)重试几轮再判失败。
+   */
+  async function processRemoteDeliverCommands() {
+    if (!backend.enabled()) return;
+    if (state.deliverBusy) return;
+    let cmds;
+    try { cmds = (await backend.listDeliverCommands()).commands || []; }
+    catch (_) { return; }              // 后端不可达，下轮再来
+    if (!cmds.length) return;
+    let orders;
+    try { orders = await bridge.call('fetchWaitShipOrders', { maxPages: 2 }, 15000); }
+    catch (_) { log('warn', '远程发货：拉订单失败，下轮重试'); return; }
+    const byId = {};
+    for (const o of (orders || [])) byId[o.orderId] = o;
+
+    for (const c of cmds) {
+      const oid = c.order_id;
+      if (state.deliveredOrders[oid]) {
+        delete state.remoteCmdTries[oid];
+        await backend.resolveDeliverCommand(oid, 'done', '（已发过，未重复）').catch(() => {});
+        continue;
+      }
+      const order = byId[oid];
+      if (!order || order.orderStatus !== '待发货' || order.inRefund) {
+        delete state.remoteCmdTries[oid];
+        await backend.resolveDeliverCommand(oid, 'failed', '订单已不在待发货（已发/退款/超时？）').catch(() => {});
+        continue;
+      }
+      // 真正发卡：抢锁，只在发送期间互斥
+      if (state.deliverBusy || state.busy) return;   // 通道忙 → 本轮到此，下轮继续
+      state.deliverBusy = true;
+      try { await deliverOrder(order); }
+      finally { state.deliverBusy = false; }
+
+      if (state.deliveredOrders[oid]) {
+        delete state.remoteCmdTries[oid];
+        await backend.resolveDeliverCommand(oid, 'done', '').catch(() => {});
+      } else {
+        // 没成功（会话没定位到/草稿占用/缺货）：重试几轮再判失败，避免一次瞬时抖动就放弃
+        const n = (state.remoteCmdTries[oid] || 0) + 1;
+        state.remoteCmdTries[oid] = n;
+        if (n >= 3) {
+          delete state.remoteCmdTries[oid];
+          await backend.resolveDeliverCommand(oid, 'failed', '多次尝试未成功（缺货/会话定位失败/输入框有草稿），请回电脑手动发').catch(() => {});
+        }
+        // n<3：不 resolve，保持 pending，下轮自动重试
+      }
     }
   }
 
@@ -1175,6 +1252,8 @@
       // 2) 订单监控：自动发货 + 飞机推送，独立于回复开关（内部各有自己的开关与
       // "你在操作时暂缓"逻辑，见 deliveryPass 注释）
       await deliveryPass();
+      // 3) 远程发货：飞机上点了「发货」按钮排下的指令，取回来执行（独立于自动发货开关）
+      await processRemoteDeliverCommands();
     } catch (e) {
       const m = String(e && e.message || e);
       // 扩展被重载后本页老脚本已失效：chrome API 全部抛此错，tick 永远跑不完，

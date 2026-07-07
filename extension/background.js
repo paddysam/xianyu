@@ -212,7 +212,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: true });
           break;
         case 'TG_PUSH':
-          sendResponse(await pushTelegram(msg.text));
+          sendResponse(await pushTelegram(msg.text, msg.deliverOrderId));
           break;
         case 'BACKEND_FETCH':
           sendResponse(await backendFetch(msg));
@@ -379,7 +379,7 @@ function notify(title, message) {
  * 纯文本，不带任何按钮（手机上没有插件环境，工作台链接没用）。
  * 未配置 token/chatId 时静默跳过。返回 { ok, error? }
  */
-async function pushTelegram(text) {
+async function pushTelegram(text, deliverOrderId) {
   const { settings = {} } = await chrome.storage.local.get('settings');
   const token = (settings.tgBotToken || '').trim();
   const chatId = String(settings.tgChatId || '').trim();
@@ -387,13 +387,18 @@ async function pushTelegram(text) {
   if (settings.enabled === false) return { ok: false, error: '总开关已关闭' };
   if (settings.tgPushEnabled === false) return { ok: false, error: '飞机推送已关闭' };
   try {
+    const body = {
+      chat_id: chatId,
+      text: String(text || '').slice(0, 3800)
+    };
+    // 新订单推送带「发货」按钮：点了 → 服务器排指令 → 插件轮询执行（远程发货）
+    if (deliverOrderId) {
+      body.reply_markup = { inline_keyboard: [[{ text: '📦 点这里发货', callback_data: 'dlv:' + deliverOrderId }]] };
+    }
     const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: String(text || '').slice(0, 3800)
-      })
+      body: JSON.stringify(body)
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok === false) {

@@ -43,7 +43,11 @@
       getKb: () => req('GET', '/api/kb'),
       saveKb: (kb) => req('PUT', '/api/kb', kb),
       getStyle: () => req('GET', '/api/style?limit=800'),
-      addStyle: (samples) => req('POST', '/api/style', { samples })
+      addStyle: (samples) => req('POST', '/api/style', { samples }),
+      // 远程发货指令（飞机点发货→插件轮询执行）
+      listDeliverCommands: () => req('GET', '/api/deliver-commands'),
+      resolveDeliverCommand: (orderId, status, result) =>
+        req('POST', '/api/deliver-commands/' + orderId + '/resolve', { status, result })
     };
   }
   window.__XY_makeBackend = makeBackend;

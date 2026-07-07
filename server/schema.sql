@@ -60,3 +60,19 @@ CREATE TABLE IF NOT EXISTS kv_store (
   v             MEDIUMTEXT,
   updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='杂项键值（如店铺知识文本）';
+
+-- 远程发货指令队列：飞机上点「发货」→ 这里排一条 → 插件轮询取走执行 → 回写结果
+CREATE TABLE IF NOT EXISTS deliver_commands (
+  id            BIGINT PRIMARY KEY AUTO_INCREMENT,
+  order_id      VARCHAR(64) NOT NULL UNIQUE COMMENT '闲鱼订单号，唯一：同一单只排一条指令',
+  buyer         VARCHAR(255) NOT NULL DEFAULT '',
+  title         VARCHAR(255) NOT NULL DEFAULT '',
+  spec          VARCHAR(255) NOT NULL DEFAULT '',
+  price         VARCHAR(32)  NOT NULL DEFAULT '',
+  status        VARCHAR(16)  NOT NULL DEFAULT 'pending' COMMENT 'pending=待插件执行 / done=已发 / failed=失败',
+  result        VARCHAR(255) NOT NULL DEFAULT '' COMMENT '执行结果说明（回写）',
+  source        VARCHAR(16)  NOT NULL DEFAULT 'tg' COMMENT '来源：tg=飞机',
+  created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='远程发货指令队列（飞机→插件）';

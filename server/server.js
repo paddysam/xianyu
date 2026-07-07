@@ -313,6 +313,32 @@ app.delete('/api/style', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---------- 远程发货指令队列（飞机点「发货」→ 插件轮询执行）----------
+
+// 插件取待执行指令
+app.get('/api/deliver-commands', wrap(async (req, res) => {
+  const [rows] = await pool.query(
+    "SELECT order_id, buyer, title, spec, price FROM deliver_commands WHERE status='pending' ORDER BY id LIMIT 20");
+  res.json({ ok: true, commands: rows });
+}));
+
+// 插件回写执行结果：status=done/failed，result 为说明
+app.post('/api/deliver-commands/:orderId/resolve', wrap(async (req, res) => {
+  const { status = 'done', result = '' } = req.body || {};
+  const st = status === 'done' ? 'done' : 'failed';
+  await pool.query(
+    'UPDATE deliver_commands SET status=?, result=? WHERE order_id=?',
+    [st, String(result).slice(0, 250), req.params.orderId]);
+  // 结果回推飞机（配了 TG 才发）
+  if (TG_TOKEN && TG_CHAT) {
+    const [[cmd]] = await pool.query(
+      'SELECT buyer, title, spec FROM deliver_commands WHERE order_id=?', [req.params.orderId]);
+    const who = cmd ? `${cmd.buyer}「${cmd.title}${cmd.spec ? '/' + cmd.spec : ''}」` : req.params.orderId;
+    tgReply(st === 'done' ? `✅ 远程发货成功：${who}` : `⚠️ 远程发货未成功：${who}\n${result || ''}\n可回电脑手动发`);
+  }
+  res.json({ ok: true });
+}));
+
 // ---------- Telegram 机器人：远程查库存 / 补货（服务器 7x24 在线，无需浏览器） ----------
 // .env 配置 TG_BOT_TOKEN + TG_CHAT_ID 后启用；只响应 TG_CHAT_ID（店主本人）的消息，
 // 其他任何人发消息一律忽略。指令：
@@ -406,6 +432,18 @@ async function tgHandleCallback(cb) {
     tgPending = null;
     return tgReply('已取消，没有入库任何卡密。');
   }
+  // 飞机点「发货」→ 排一条远程发货指令，插件轮询取走执行（订单号唯一，重复点不会重排）
+  if (data.startsWith('dlv:')) {
+    const orderId = data.slice(4);
+    if (!orderId) return tgReply('发货指令缺少订单号。');
+    // 已发过的不再排（查发货记录）
+    const [[done]] = await pool.query('SELECT id FROM deliveries WHERE order_id=?', [orderId]);
+    if (done) return tgReply(`这单（尾号 …${orderId.slice(-4)}）已经发过货了，未重复发。`);
+    await pool.query(
+      "INSERT INTO deliver_commands (order_id) VALUES (?) ON DUPLICATE KEY UPDATE status='pending', result=''",
+      [orderId]);
+    return tgReply(`✅ 已排单，电脑上的插件将尽快发货（订单尾号 …${orderId.slice(-4)}）。\n发完会回你结果。`);
+  }
 }
 
 async function tgHandleText(text) {
@@ -469,16 +507,35 @@ async function tgPollLoop() {
   }
 }
 
+// 启动时自建"远程发货指令队列"表（新表，老库自愈，无需手动跑 SQL）
+async function ensureDeliverCommandsTable() {
+  await pool.query(`CREATE TABLE IF NOT EXISTS deliver_commands (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    order_id VARCHAR(64) NOT NULL UNIQUE,
+    buyer VARCHAR(255) NOT NULL DEFAULT '',
+    title VARCHAR(255) NOT NULL DEFAULT '',
+    spec VARCHAR(255) NOT NULL DEFAULT '',
+    price VARCHAR(32) NOT NULL DEFAULT '',
+    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    result VARCHAR(255) NOT NULL DEFAULT '',
+    source VARCHAR(16) NOT NULL DEFAULT 'tg',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_status (status)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+}
+
 // 部署到远程服务器供本地浏览器插件访问时绑 0.0.0.0；只在本机用可设为 127.0.0.1
 const BIND = process.env.BIND_HOST || '0.0.0.0';
-app.listen(PORT, BIND, () => {
+app.listen(PORT, BIND, async () => {
   console.log(`✓ 闲鱼助手后端已启动: http://${BIND}:${PORT}`);
   console.log(`  健康检查: /api/health`);
+  try { await ensureDeliverCommandsTable(); } catch (e) { console.error('建表 deliver_commands 失败:', e.message); }
   if (BIND !== '127.0.0.1' && !AUTH_TOKEN) {
     console.log('  ⚠️ 已对外监听但未设置 AUTH_TOKEN，强烈建议在 .env 设置访问令牌！');
   }
   if (TG_TOKEN && TG_CHAT) {
     tgPollLoop();
-    console.log(`✓ Telegram 机器人已启动（远程查库存/补货，只服务 chat ${TG_CHAT}）`);
+    console.log(`✓ Telegram 机器人已启动（远程查库存/补货/发货，只服务 chat ${TG_CHAT}）`);
   }
 });

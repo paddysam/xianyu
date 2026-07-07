@@ -1120,6 +1120,15 @@
     }
   }
 
+  /**
+   * 本页脚本是否还连着扩展本体。扩展被重载后，旧页面脚本的 chrome.runtime.id
+   * 会变 undefined——此时拉订单仍是好的（走页面自己的接口通道），但调后端、
+   * 存配置全会失败，症状极具迷惑性。手动按钮点击前必须先自检。
+   */
+  function extAlive() {
+    try { return !!(chrome.runtime && chrome.runtime.id); } catch (_) { return false; }
+  }
+
   /** 扩展已重载、本页脚本成僵尸：停止轮询，角标变红提示按 F5 刷新 */
   function markZombie() {
     state.running = false;
@@ -1296,6 +1305,12 @@
 
   /** 点按钮：把当前打开的会话加入/移出免打扰名单 */
   async function onMuteClick() {
+    // 断线自检：僵尸脚本存不了名单（chrome.storage 已失效），明说而不是静默失败
+    if (!extAlive()) {
+      markZombie();
+      alert('插件刚更新过，本页面的脚本已断线，设置无法保存。\n请按 F5 刷新工作台页面后再操作。');
+      return;
+    }
     const act = document.querySelector(state.S.convActive);
     if (!act) return;
     const conv = parseConvItem(act);
@@ -1373,6 +1388,13 @@
    *   4. 后端 /api/deliver 的 orderId 唯一约束是最后兜底，绝不会扣两张卡。
    */
   async function deliverToActiveConversation() {
+    // 断线自检：插件重载后旧脚本"拉订单正常、发卡必挂"，症状迷惑性极强，
+    // 必须在动手前就拦下并明说，而不是跑到后端调用失败才报含糊错误
+    if (!extAlive()) {
+      markZombie();
+      alert('插件刚更新过，本页面的脚本已断线（拉订单正常但发不了货）。\n请按 F5 刷新工作台页面后，再点「发货」。');
+      return;
+    }
     const act = document.querySelector(state.S.convActive);
     if (!act) { alert('请先打开一个买家的会话，再点发货'); return; }
     const conv = parseConvItem(act);

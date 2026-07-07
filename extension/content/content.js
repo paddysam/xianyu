@@ -1586,11 +1586,21 @@
       alert('聊天输入框里有一段还没发送的草稿。\n为了不覆盖你打的字，请先把它发出去（或清空），再点「发货」。');
       return;
     }
-    // 互斥：机器人正在发 / 上一次点击还没跑完 → 挡下，避免重复
-    if (state.deliverBusy) { alert('正在发货处理中，请稍候几秒再点～'); return; }
-    state.deliverBusy = true;
     const btn = document.getElementById('__xy_deliver_btn');
     const oldText = btn ? btn.textContent : '';
+    // 互斥：订单监控每5秒就要拉一次接口（飞机推送发现新单也靠它），会占这把锁1~3秒，
+    // 随手一点撞上的概率不小——撞上就自动等它腾出来（按钮已禁点，不会重复触发），
+    // 而不是弹窗让你自己重试
+    if (state.deliverBusy) {
+      if (btn) { btn.textContent = '⏳ 等待后台空闲…'; btn.style.pointerEvents = 'none'; btn.style.opacity = '.7'; }
+      const free = await waitFor(() => !state.deliverBusy, 15000);
+      if (!free) {
+        if (btn) { btn.textContent = oldText; btn.style.pointerEvents = ''; btn.style.opacity = ''; }
+        alert('后台发货通道占用超过15秒（可能网络卡顿），请稍后再点一次');
+        return;
+      }
+    }
+    state.deliverBusy = true;
     if (btn) { btn.textContent = '⏳ 正在核对订单…'; btn.style.pointerEvents = 'none'; btn.style.opacity = '.7'; }
     try {
       // 对称互斥：deliverBusy 已占锁挡住"新的 tick"，但可能有一轮 tick 正在跑

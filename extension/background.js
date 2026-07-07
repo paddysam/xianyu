@@ -186,9 +186,32 @@ async function checkOffline() {
   if (!anythingOn(settings)) return; // 回复/发货/推送全关着才不管
   const last = (heartbeat && heartbeat.ts) || 0;
   const stale = Date.now() - last > OFFLINE_THRESHOLD_MS;
-  if (stale && !watchdog.warned) {
-    notify('⚠️ 工作台掉线', '闲鱼卖家工作台页面已关闭或掉线，自动客服已停止！买家付款可能无人发货，请尽快重新打开并登录。');
-    await chrome.storage.local.set({ watchdog: { warned: true } });
+  if (!stale) {
+    // 心跳正常：清掉"疑似掉线"计数
+    if (watchdog.staleOnce) await chrome.storage.local.set({ watchdog: { ...watchdog, staleOnce: false } });
+    return;
+  }
+  // 心跳超时。先看工作台标签还在不在：
+  let hasTab = false;
+  try {
+    const tabs = await chrome.tabs.query({
+      url: ['https://seller.goofish.com/*', 'https://www.goofish.com/im*']
+    });
+    hasTab = tabs.length > 0;
+  } catch (_) {}
+  // 标签还在，且这是第一轮心跳超时 → 多半只是被浏览器冻结：戳它一下补心跳，本轮先不报警，
+  // 给它一分钟自证（健康的标签下轮心跳就回来了，就不会走到报警）。只有连续两轮都无心跳
+  // （戳了也不回＝页面真关了/脚本失效成僵尸/被登出）才报警，杜绝"页面好好的却误报掉线"。
+  if (hasTab && !watchdog.staleOnce) {
+    pokeTabs();
+    await chrome.storage.local.set({ watchdog: { ...watchdog, staleOnce: true } });
+    return;
+  }
+  if (!watchdog.warned) {
+    notify('⚠️ 工作台掉线', hasTab
+      ? '闲鱼工作台标签还在但脚本已失效（多半是插件更新后没刷新）——请按 F5 刷新该页面！自动客服/发货已停止，买家付款可能无人发货。'
+      : '闲鱼卖家工作台标签已关闭，自动客服/发货已停止！买家付款可能无人发货，请尽快重新打开并登录。');
+    await chrome.storage.local.set({ watchdog: { warned: true, staleOnce: false } });
   }
 }
 

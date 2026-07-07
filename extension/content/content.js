@@ -1358,6 +1358,10 @@
     // 后台定时"戳"：标签在后台被浏览器节流时，靠后台 SW 驱动强制跑一轮。
     // 不看 running——回复关着时订单监控（发货/推送）也要被戳活
     if (msg && msg.type === 'TICK_NOW') {
+      // 关键：顺手发一次心跳。后台标签被浏览器冻结后，页面自己的 setInterval(heartbeat)
+      // 会停摆，光靠它会被误判"掉线"；而 SW 每分钟戳一次能唤醒本标签，借这次戳补心跳，
+      // 只要标签还活着就不会误报掉线（真关了/僵尸了才收不到戳，才会真掉线）
+      heartbeat();
       if (!state.busy) tick();
       sendResponse({ ok: true });
       return;

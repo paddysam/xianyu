@@ -565,7 +565,12 @@ function renderStock() {
       try {
         await backend.restock(p.id, added);
         p.stock = (p.stock || 0) + added.length;
-        p._cards = [...(p._cards || []), ...added]; // 同步明细缓存
+        // 从数据库重拉明细：_cards 是 {id, secret} 对象数组，直接塞字符串会渲染成
+        // undefined，且新卡没有 id 导致"移除"按钮失效
+        try {
+          const r = await backend.listCards(p.id);
+          p._cards = (r.cards || []).map(c => ({ id: c.id, secret: c.secret }));
+        } catch (_) { p._cards = null; /* 拉取失败则下次展开时重新加载 */ }
       } catch (e) { alert('补货失败：' + e.message); return; }
     } else {
       products[i].cards = [...(products[i].cards || []), ...added];

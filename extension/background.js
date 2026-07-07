@@ -7,7 +7,8 @@
  */
 
 const DEFAULT_SETTINGS = {
-  enabled: false,               // 总开关
+  enabled: false,               // 总开关（插件弹窗）：关了回复/自动发货/飞机推送全部停
+  replyEnabled: true,           // 机器人回复单项开关（页面角标切换；总开关开着才生效）
   aiEnabled: true,              // 知识库未命中时是否调用 AI
   learnHumanStyle: true,        // 记录你的手动回复当范本，让 AI 学你的说话风格
   styleSampleCount: 30,         // 每次喂给 AI 的风格范本条数（20~40 较合适，太多费 token 也没必要）
@@ -68,8 +69,15 @@ const LOG_LIMIT = 200;
 
 chrome.runtime.onInstalled.addListener(async () => {
   const cur = await chrome.storage.local.get(['settings', 'kb', 'products', 'stats']);
+  const settings = { ...DEFAULT_SETTINGS, ...(cur.settings || {}) };
+  // 语义迁移：enabled 从"只管机器人回复"升级为"总开关"，回复单项拆到 replyEnabled。
+  // 老配置（没有 replyEnabled 字段）：保留原回复开关状态，总开关置开 → 升级前后行为不变
+  if (cur.settings && cur.settings.replyEnabled === undefined) {
+    settings.replyEnabled = cur.settings.enabled === true;
+    settings.enabled = true;
+  }
   await chrome.storage.local.set({
-    settings: { ...DEFAULT_SETTINGS, ...(cur.settings || {}) },
+    settings,
     kb: { ...DEFAULT_KB, ...(cur.kb || {}) },
     products: cur.products || [],   // [{id, match, delivery, note}]
     stats: cur.stats || { repliesSent: 0, deliveriesSent: 0, aiCalls: 0 }
@@ -127,9 +135,10 @@ chrome.runtime.onStartup.addListener(() => setTimeout(ensureWorkbenchTab, 4000))
  * 这样标签被关了也能在 1 分钟内自动挂回来，浏览器开着即可。
  */
 let ensuringTab = false; // 互斥：防止多个触发并发各开一个标签
-/** 回复/发货/推送任一在用，就值得保活与掉线守护（回复关了发货推送还要跑） */
+/** 回复/发货/推送任一在用，就值得保活与掉线守护；总开关关了则全部免谈 */
 function anythingOn(settings) {
-  return !!(settings.enabled ||
+  if (settings.enabled === false) return false;   // 总开关关闭：不保活、不告警
+  return !!(settings.replyEnabled !== false ||
     settings.autoDeliver !== false ||
     (settings.tgBotToken && settings.tgChatId && settings.tgPushEnabled !== false));
 }
@@ -369,6 +378,7 @@ async function pushTelegram(text) {
   const token = (settings.tgBotToken || '').trim();
   const chatId = String(settings.tgChatId || '').trim();
   if (!token || !chatId) return { ok: false, error: '未配置 Telegram' };
+  if (settings.enabled === false) return { ok: false, error: '总开关已关闭' };
   if (settings.tgPushEnabled === false) return { ok: false, error: '飞机推送已关闭' };
   try {
     const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {

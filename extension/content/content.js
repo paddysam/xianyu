@@ -1128,6 +1128,8 @@
     // （两边都没有对方感知的锁，同时 sendReply 会互相覆盖写入内容）。
     // 注意：tick 本身常驻运行——"机器人回复"由 state.running 在下面分段控制，
     // 订单监控（自动发货+飞机推送）独立于回复开关。
+    // 但插件弹窗里的"总开关"关闭时一切暂停（回复/发货/推送全停，彻底安静）。
+    if (!state.settings || state.settings.enabled !== true) return;
     if (state.busy || state.deliverBusy) return;
     state.busy = true;
     try {
@@ -1242,7 +1244,8 @@
   /** 开启"机器人回复"（订单监控/发货/推送由常驻 tick 独立负责，不在这里管） */
   async function start() {
     await loadConfig();
-    if (!state.settings.enabled) return;
+    if (state.settings.enabled !== true) return;          // 总开关（插件弹窗）没开
+    if (state.settings.replyEnabled === false) return;    // 机器人回复单项关着
     if (state.running) return;
     // 建立基线：当前已存在的消息一律不处理，只管之后新来的
     for (const c of scanConvList()) state.baseline.set(c.key, c.lastMsg);
@@ -1295,10 +1298,13 @@
   chrome.storage.onChanged.addListener(async (changes, area) => {
     if (area !== 'local') return;
     if (changes.settings) {
-      const on = changes.settings.newValue && changes.settings.newValue.enabled;
       await loadConfig();
-      if (on && !state.running) start();
-      if (!on && state.running) stop();
+      const s = state.settings || {};
+      // 回复引擎 = 总开关(弹窗) && 回复单项(角标) 都开
+      const replyOn = s.enabled === true && s.replyEnabled !== false;
+      if (replyOn && !state.running) start();
+      if (!replyOn && state.running) stop();
+      mountBadge(); // 总开关状态变化要立刻反映到角标
     }
     if (changes.kb) state.kb = changes.kb.newValue;
     if (changes.products) state.products = changes.products.newValue;
@@ -1308,14 +1314,18 @@
 
   // ---------- 页面右下角状态角标 ----------
 
-  /** 点角标 = 开/关自动客服（直接在活脚本里执行，绕开弹窗/僵尸脚本问题） */
+  /** 点角标 = 开/关"机器人回复"单项（总开关在插件弹窗里，关了这里点不动） */
   async function toggleFromBadge() {
-    const wantOn = !state.running;
     try {
       const { settings = {} } = await chrome.storage.local.get('settings');
-      settings.enabled = wantOn;
-      await chrome.storage.local.set({ settings }); // 持久化，弹窗开关同步
-      state.settings.enabled = wantOn;
+      if (settings.enabled !== true) {
+        alert('总开关是关闭状态（在插件弹窗里：点浏览器右上角的插件图标开启）。\n总开关关闭时，回复/自动发货/飞机推送全部暂停，这个角标只管"机器人回复"单项。');
+        return;
+      }
+      const wantOn = !state.running;
+      settings.replyEnabled = wantOn;
+      await chrome.storage.local.set({ settings }); // 持久化
+      state.settings.replyEnabled = wantOn;
       if (wantOn) await start(); else stop();
     } catch (e) {
       // 扩展被重载后当前脚本会失效，chrome API 抛错 → 提示刷新
@@ -1347,8 +1357,15 @@
     }
     const dot = document.getElementById('__xy_assistant_dot');
     const txt = document.getElementById('__xy_assistant_txt');
-    b.title = '点击开启/关闭机器人自动回复（不影响自动发货和飞机推送）';
-    if (state.running) {
+    b.title = '点击开启/关闭机器人自动回复（不影响自动发货和飞机推送；总开关在插件弹窗）';
+    if (state.settings && state.settings.enabled !== true) {
+      // 总开关（插件弹窗）关闭：一切暂停，角标明示
+      b.style.background = '#f3f4f6';
+      b.style.color = '#6b7280';
+      dot.style.background = '#9ca3af';
+      dot.style.boxShadow = 'none';
+      txt.textContent = '已全部停用（总开关在插件弹窗）';
+    } else if (state.running) {
       b.style.background = '#f0fdf4';
       b.style.color = '#15803d';
       dot.style.background = '#16a34a';
@@ -1679,6 +1696,6 @@
     // 主循环常驻：订单监控（自动发货+飞机推送）只要页面开着就一直跑；
     // "机器人回复"是否工作由 state.running（总开关）在 tick 内部分段控制
     state.timer = setInterval(tick, Number(state.settings.pollIntervalMs) || 5000);
-    if (state.settings.enabled) start();
+    if (state.settings.enabled === true && state.settings.replyEnabled !== false) start();
   })();
 })();

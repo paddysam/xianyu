@@ -1378,6 +1378,13 @@
     const conv = parseConvItem(act);
     const nick = conv.name;
     if (!nick || SYSTEM_CONV_NAMES.includes(nick)) { alert('请打开一个买家会话再发货'); return; }
+    // 前置检查草稿：发卡要往输入框写内容，草稿保护会拒绝覆盖你打的字——
+    // 与其跑到最后一步被拦、回滚库存、报一个含糊的"未完成"，不如现在就说清楚
+    const ta0 = document.querySelector(state.S.inputBox);
+    if (ta0 && ta0.value && ta0.value.trim()) {
+      alert('聊天输入框里有一段还没发送的草稿。\n为了不覆盖你打的字，请先把它发出去（或清空），再点「发货」。');
+      return;
+    }
     // 互斥：机器人正在发 / 上一次点击还没跑完 → 挡下，避免重复
     if (state.deliverBusy) { alert('正在发货处理中，请稍候几秒再点～'); return; }
     state.deliverBusy = true;
@@ -1423,8 +1430,12 @@
         await sleep(rand(600, 1200));
       }
       if (ok && !fail) alert(`✓ 已给「${nick}」发货成功（${ok} 单）`);
-      else if (ok && fail) alert(`部分完成：成功 ${ok} 单，${fail} 单未完成（缺货/需人工，详见插件弹窗日志）`);
-      else alert(`发货未完成：缺货 / 没匹配的发货规则 / 需人工，详见插件弹窗「运行日志」。`);
+      else if (ok && fail) alert(`部分完成：成功 ${ok} 单，${fail} 单未完成（原因见插件弹窗「运行日志」）`);
+      else alert(
+        '发货未完成，可能原因：\n' +
+        '· 输入框有草稿 / 会话被切走 → 发送被安全拦截，库存已自动回滚，处理后再点一次即可\n' +
+        '· 库存缺货 / 没匹配的发货规则 → 需补货或人工发\n' +
+        '具体哪一种，点插件图标看「运行日志」最后几条。');
     } catch (e) {
       log('error', '手动发货异常: ' + (e && e.message));
       alert('发货出错：' + (e && e.message));

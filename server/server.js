@@ -313,6 +313,157 @@ app.delete('/api/style', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---------- Telegram 机器人：远程查库存 / 补货（服务器 7x24 在线，无需浏览器） ----------
+// .env 配置 TG_BOT_TOKEN + TG_CHAT_ID 后启用；只响应 TG_CHAT_ID（店主本人）的消息，
+// 其他任何人发消息一律忽略。指令：
+//   「库存」                 → 列出所有商品剩余卡密
+//   「补货 新版」+每行一张卡密 → 按关键词补货（也支持「补货 #8」按编号）
+const TG_TOKEN = (process.env.TG_BOT_TOKEN || '').trim();
+const TG_CHAT = (process.env.TG_CHAT_ID || '').trim();
+const https = require('https');
+
+function tgApi(method, payload) {
+  return new Promise((resolve) => {
+    const body = JSON.stringify(payload || {});
+    const req = https.request(
+      `https://api.telegram.org/bot${TG_TOKEN}/${method}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } },
+      (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => { try { resolve(JSON.parse(d)); } catch (_) { resolve(null); } }); });
+    req.on('error', () => resolve(null));
+    req.setTimeout(40000, () => { req.destroy(); resolve(null); }); // 长轮询 30s + 余量
+    req.write(body); req.end();
+  });
+}
+const tgReply = (text, keyboard) => tgApi('sendMessage', {
+  chat_id: TG_CHAT, text: String(text).slice(0, 3800),
+  ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {})
+});
+
+async function tgStockText() {
+  const [rows] = await pool.query(`
+    SELECT p.*, (SELECT COUNT(*) FROM cards c WHERE c.product_id=p.id AND c.status='available') AS stock
+    FROM products p ORDER BY p.id`);
+  if (!rows.length) return '还没有配置任何商品规则。';
+  return rows.map(p =>
+    `#${p.id} ${p.match_title}${p.spec ? ' / ' + p.spec : ''}${p.price ? ' ¥' + p.price : ''} — ` +
+    (p.mode === 'pool' ? `在库 ${p.stock} 张${p.stock <= 2 ? ' ⚠️' : ''}` : '固定内容')).join('\n');
+}
+
+/** 主菜单（任何看不懂的消息都回这个，点按钮操作，不用打字） */
+const tgMenu = () => tgReply('你好，要做什么？点下面的按钮：', [
+  [{ text: '📦 查库存', callback_data: 'stock' }],
+  [{ text: '➕ 补货', callback_data: 'restock' }]
+]);
+
+/** 补货第一步：列出所有卡密类商品当按钮，点哪个补哪个（选不错） */
+async function tgRestockPicker() {
+  const [rows] = await pool.query(`
+    SELECT p.*, (SELECT COUNT(*) FROM cards c WHERE c.product_id=p.id AND c.status='available') AS stock
+    FROM products p WHERE p.mode='pool' ORDER BY p.id`);
+  if (!rows.length) return tgReply('没有卡密类商品可补货（固定内容商品不需要库存）。');
+  return tgReply('给哪个商品补货？点按钮选择：', rows.map(p => ([{
+    text: `#${p.id} ${p.match_title}${p.spec ? '/' + p.spec : ''} ¥${p.price || '?'} · 在库${p.stock}`,
+    callback_data: 'pick:' + p.id
+  }])));
+}
+
+// 补货会话状态（单店主，一个状态足够；15 分钟不动作自动过期）
+let tgPending = null; // { stage:'await_cards'|'await_confirm', productId, label, cards, ts }
+const tgPendingFresh = () => tgPending && Date.now() - tgPending.ts < 15 * 60000;
+
+async function tgHandleCallback(cb) {
+  const data = String(cb.data || '');
+  await tgApi('answerCallbackQuery', { callback_query_id: cb.id }); // 让按钮停止转圈
+  if (data === 'stock') {
+    return tgReply('📦 当前库存：\n' + await tgStockText());
+  }
+  if (data === 'restock') {
+    return tgRestockPicker();
+  }
+  if (data.startsWith('pick:')) {
+    const id = Number(data.slice(5));
+    const [rows] = await pool.query(`SELECT * FROM products WHERE id=? AND mode='pool'`, [id]);
+    if (!rows.length) return tgReply('这个商品不存在了，重新点「➕ 补货」选一次。');
+    const p = rows[0];
+    const label = `#${p.id} ${p.match_title}${p.spec ? ' / ' + p.spec : ''} ¥${p.price || '?'}`;
+    tgPending = { stage: 'await_cards', productId: p.id, label, cards: [], ts: Date.now() };
+    return tgReply(`好，给「${label}」补货。\n\n现在把卡密发给我：一条消息里每行一张。\n（发「取消」可退出）`);
+  }
+  if (data === 'confirm') {
+    if (!tgPendingFresh() || tgPending.stage !== 'await_confirm') { tgPending = null; return tgReply('这次补货已过期或已处理，重新点「➕ 补货」来一次。'); }
+    const { productId, label, cards } = tgPending;
+    tgPending = null;
+    await pool.query('INSERT INTO cards (product_id, secret) VALUES ?', [cards.map(s => [productId, s])]);
+    const [[cnt]] = await pool.query(
+      `SELECT COUNT(*) AS n FROM cards WHERE product_id=? AND status='available'`, [productId]);
+    return tgReply(`✅ 入库成功：${cards.length} 张 → ${label}\n现在库存：${cnt.n} 张`);
+  }
+  if (data === 'cancel') {
+    tgPending = null;
+    return tgReply('已取消，没有入库任何卡密。');
+  }
+}
+
+async function tgHandleText(text) {
+  const raw = String(text || '').trim();
+  if (/^取消$/.test(raw)) { tgPending = null; return tgReply('已取消。'); }
+
+  // 补货第二步：正在等卡密 → 这条消息的每一行都是一张卡，回显预览等确认
+  if (tgPendingFresh() && tgPending.stage === 'await_cards') {
+    const cards = raw.split('\n').map(s => s.trim()).filter(Boolean);
+    if (!cards.length) return tgReply('没读到内容，每行一张卡密再发一次，或发「取消」退出。');
+    // 查重：同商品库里已有完全相同的卡密 → 提醒（防手滑重复粘贴）
+    const [dups] = await pool.query(
+      `SELECT secret FROM cards WHERE product_id=? AND secret IN (?)`,
+      [tgPending.productId, cards]);
+    tgPending.cards = cards;
+    tgPending.stage = 'await_confirm';
+    tgPending.ts = Date.now();
+    const preview = cards.length <= 5 ? cards.join('\n')
+      : cards.slice(0, 3).join('\n') + `\n…（共 ${cards.length} 张）…\n` + cards[cards.length - 1];
+    return tgReply(
+      `请核对后确认入库：\n商品：${tgPending.label}\n数量：${cards.length} 张\n` +
+      (dups.length ? `\n⚠️ 注意：有 ${dups.length} 张和库里已有卡密完全相同（可能重复粘贴了）\n` : '') +
+      `\n${preview}`,
+      [[{ text: `✅ 确认入库 ${cards.length} 张`, callback_data: 'confirm' }, { text: '❌ 取消', callback_data: 'cancel' }]]);
+  }
+
+  if (/^(库存|查库存|\/stock)$/i.test(raw)) {
+    return tgReply('📦 当前库存：\n' + await tgStockText());
+  }
+  if (/^(补货|\/restock)/.test(raw)) {
+    return tgRestockPicker();
+  }
+  // 其他任何消息（包括 /start）→ 菜单按钮
+  return tgMenu();
+}
+
+let tgOffset = 0;
+async function tgPollLoop() {
+  for (;;) {
+    try {
+      const r = await tgApi('getUpdates', { offset: tgOffset, timeout: 25, allowed_updates: ['message', 'callback_query'] });
+      if (r && r.ok && Array.isArray(r.result)) {
+        for (const u of r.result) {
+          tgOffset = u.update_id + 1;
+          // 只认店主本人：消息看 chat.id，按钮回调看 from.id，其他人一律忽略
+          if (u.message && u.message.text && String(u.message.chat && u.message.chat.id) === TG_CHAT) {
+            try { await tgHandleText(u.message.text); }
+            catch (e) { tgReply('处理出错：' + e.message); }
+          } else if (u.callback_query && String(u.callback_query.from && u.callback_query.from.id) === TG_CHAT) {
+            try { await tgHandleCallback(u.callback_query); }
+            catch (e) { tgReply('处理出错：' + e.message); }
+          }
+        }
+      } else {
+        await new Promise(r2 => setTimeout(r2, 5000)); // 接口异常退避
+      }
+    } catch (_) {
+      await new Promise(r2 => setTimeout(r2, 5000));
+    }
+  }
+}
+
 // 部署到远程服务器供本地浏览器插件访问时绑 0.0.0.0；只在本机用可设为 127.0.0.1
 const BIND = process.env.BIND_HOST || '0.0.0.0';
 app.listen(PORT, BIND, () => {
@@ -320,5 +471,9 @@ app.listen(PORT, BIND, () => {
   console.log(`  健康检查: /api/health`);
   if (BIND !== '127.0.0.1' && !AUTH_TOKEN) {
     console.log('  ⚠️ 已对外监听但未设置 AUTH_TOKEN，强烈建议在 .env 设置访问令牌！');
+  }
+  if (TG_TOKEN && TG_CHAT) {
+    tgPollLoop();
+    console.log(`✓ Telegram 机器人已启动（远程查库存/补货，只服务 chat ${TG_CHAT}）`);
   }
 });

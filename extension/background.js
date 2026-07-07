@@ -361,7 +361,7 @@ function notify(title, message) {
 
 /**
  * 推送到 Telegram（只发给 settings.tgChatId 这一个账号）。
- * 带一个"打开工作台"按钮，手机上点开也能看；在电脑上点开即可直接发货。
+ * 纯文本，不带任何按钮（手机上没有插件环境，工作台链接没用）。
  * 未配置 token/chatId 时静默跳过。返回 { ok, error? }
  */
 async function pushTelegram(text) {
@@ -376,10 +376,7 @@ async function pushTelegram(text) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: chatId,
-        text: String(text || '').slice(0, 3800),
-        reply_markup: {
-          inline_keyboard: [[{ text: '🖥 打开卖家工作台', url: 'https://seller.goofish.com/?site=COMMONPRO#/im' }]]
-        }
+        text: String(text || '').slice(0, 3800)
       })
     });
     const data = await resp.json().catch(() => ({}));

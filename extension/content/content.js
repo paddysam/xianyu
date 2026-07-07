@@ -765,7 +765,8 @@
             await rememberDelivered(order);
             bumpStat('deliveriesSent');
             log('info', `已发货：订单 ${order.orderId}「${skuLabel}」→ ${order.buyerNick}，剩余库存 ${r.stockLeft}`);
-            tgPush(`✅ 已自动发货\n买家：${order.buyerNick}\n商品：${skuLabel}\n剩余库存：${r.stockLeft}${r.stockLeft <= 2 ? '（⚠️ 该补货了）' : ''}`);
+            tgPush(`✅ 已自动发货\n买家：${order.buyerNick}\n商品：${skuLabel}\n剩余库存：${r.stockLeft}` +
+              (r.stockLeft <= 2 ? '（⚠️ 该补货了）\n\n💡 直接回复本机器人即可远程补货：\n补货 新版\n卡密1\n卡密2' : ''));
             await autoConsign(order, skuLabel); // 点亮订单发货，闭环
           } else {
             // 聊天发送失败 → 回滚数据库，恢复卡密，下轮重试

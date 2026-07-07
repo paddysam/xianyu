@@ -580,6 +580,22 @@ $('addProdFromStock').addEventListener('click', () => {
 $('save').addEventListener('click', async () => {
   const res = $('saveResult');
   try {
+    // 清理空白商品规则（点了"添加"但啥都没填的行）——不清会以"(未命名)"垃圾行入库：
+    //   · 全空 → 直接丢弃；已经在数据库里的（有数字id）加入待删除，顺带自愈历史脏数据
+    //   · 填了内容但没填标题 → 拦下保存并提示，绝不静默丢用户填的东西
+    const halfFilled = [];
+    products = products.filter(p => {
+      if (p.match && p.match.trim()) return true;
+      const hasContent = (p.delivery && p.delivery.trim()) || (p.note && p.note.trim()) ||
+        (p.spec && String(p.spec).trim()) || (p.price && String(p.price).trim()) ||
+        (p.cards || []).some(c => c && c.trim());
+      if (hasContent) { halfFilled.push(p); return true; }
+      if (typeof p.id === 'number') deletedProductIds.push(p.id);
+      return false;
+    });
+    if (halfFilled.length) {
+      throw new Error(`有 ${halfFilled.length} 条商品规则填了内容但没填「商品标题匹配」，请到「商品发货」页补上标题（或清空该条）再保存`);
+    }
     const { settings = {} } = await chrome.storage.local.get('settings');
     for (const f of SETTING_FIELDS) {
       if (!$(f)) continue;

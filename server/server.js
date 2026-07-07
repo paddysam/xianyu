@@ -56,6 +56,10 @@ app.get('/api/products', wrap(async (req, res) => {
 
 app.post('/api/products', wrap(async (req, res) => {
   const b = req.body || {};
+  // 空标题的规则永远匹配不到订单，只会变成"(未命名)"垃圾行，拒收
+  if (!b.match || !String(b.match).trim()) {
+    return res.status(400).json({ ok: false, error: '商品标题匹配不能为空' });
+  }
   const [r] = await pool.query(
     `INSERT INTO products (match_title, spec, price, mode, delivery, note)
      VALUES (?,?,?,?,?,?)`,
@@ -65,6 +69,9 @@ app.post('/api/products', wrap(async (req, res) => {
 
 app.put('/api/products/:id', wrap(async (req, res) => {
   const b = req.body || {};
+  if (!b.match || !String(b.match).trim()) {
+    return res.status(400).json({ ok: false, error: '商品标题匹配不能为空' });
+  }
   await pool.query(
     `UPDATE products SET match_title=?, spec=?, price=?, mode=?, delivery=?, note=? WHERE id=?`,
     [b.match || '', b.spec || '', b.price || '', b.mode || 'pool', b.delivery || '', b.note || '', req.params.id]);

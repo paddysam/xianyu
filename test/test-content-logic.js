@@ -27,9 +27,11 @@ function extract(name) {
 const logs = [];
 const stored = {};
 let fakeInputValue = '';   // 模拟聊天输入框里的内容（userActive 用）
+const notifies = [];       // 捕获 notify 调用（告警节流测试用）
 const sandbox = {
   state: { settings: {}, products: [], S: { inputBox: 'textarea' } },
   log: (lv, tx) => logs.push(lv + ': ' + tx),
+  notify: (title, msg) => notifies.push(title + '|' + msg),
   chrome: { storage: { local: { set: async (o) => Object.assign(stored, o) } } },
   // rand 返回 {min,max} 便于断言边界（replyDelay 直接透传 rand 的返回值）
   rand: (min, max) => ({ min, max }),
@@ -37,7 +39,7 @@ const sandbox = {
   // 极简 document：只支持 querySelector(inputBox) 返回带 value 的假输入框
   document: { querySelector: (sel) => (sel === 'textarea' ? { value: fakeInputValue } : null) },
 };
-const fnNames = ['matchProduct', 'prepareDelivery', 'consumeCard', 'looksLikeCredential', 'replyDelay', 'buildDeliveryInfo', 'withBotMark', 'isMuted', 'setMuted', 'pickDeliverableOrders', 'userActive'];
+const fnNames = ['matchProduct', 'prepareDelivery', 'consumeCard', 'looksLikeCredential', 'replyDelay', 'buildDeliveryInfo', 'withBotMark', 'isMuted', 'setMuted', 'pickDeliverableOrders', 'userActive', 'noteConvLocateFail'];
 const code = fnNames.map(extract).join('\n\n');
 const vm = require('vm');
 vm.createContext(sandbox);
@@ -235,6 +237,27 @@ console.log('\n[C] consumeCard 扣库存');
   ok('自定义5秒窗口：8秒前动过 → 不忙', !F.userActive());
   sandbox.state.lastUserActivity = now - 3000;
   ok('自定义5秒窗口：3秒前动过 → 忙', F.userActive());
+
+  // ========== K. 未定位到会话的告警节流（防"狼来了"） ==========
+  console.log('\n[K] noteConvLocateFail 告警节流');
+  sandbox.state.convLocateFail = {};
+  sandbox.state.manualAlertAt = {};
+  notifies.length = 0;
+  const ord = { orderId: 'OD1', buyerNick: '张三', title: 'HeyGen会员号' };
+  F.noteConvLocateFail(ord);
+  F.noteConvLocateFail(ord);
+  eq('前两次瞬时失败 → 只记日志不告警', notifies.length, 0);
+  F.noteConvLocateFail(ord);
+  eq('第三次连续失败 → 告警一次', notifies.length, 1);
+  F.noteConvLocateFail(ord);
+  F.noteConvLocateFail(ord);
+  eq('30分钟内继续失败 → 不重复告警', notifies.length, 1);
+  sandbox.state.manualAlertAt['OD1'] = Date.now() - 31 * 60000; // 模拟31分钟前告警过
+  F.noteConvLocateFail(ord);
+  eq('超过30分钟仍失败 → 再告警一次', notifies.length, 2);
+  // 另一个订单独立计数
+  F.noteConvLocateFail({ orderId: 'OD2', buyerNick: '李四', title: 'X' });
+  eq('不同订单独立计数（OD2第一次不告警）', notifies.length, 2);
 
   console.log('\n===== content.js 逻辑: ' + pass + ' 通过, ' + fail + ' 失败 =====');
   process.exit(fail ? 1 : 0);

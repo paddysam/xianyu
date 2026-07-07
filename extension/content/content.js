@@ -31,6 +31,8 @@
     baseline: new Map(),        // convKey -> lastMsg 快照
     deliveredOrders: {},         // orderId -> {ts, card, title, buyer} 已发货订单（持久化去重）
     tgNotified: {},              // orderId -> ts 已推送过 Telegram"新订单"的单（持久化去重，防重复推）
+    convLocateFail: {},          // orderId -> 连续"未定位到会话"次数（瞬时失败不告警，连续≥3轮才喊人工）
+    manualAlertAt: {},           // orderId -> 上次"需人工"告警时间（同一订单30分钟内不重复喊）
     humanHandoff: {},            // convKey -> ts 转人工接管中的会话（持久化）
     replyTimestamps: new Map(), // convKey -> [ts, ...] 用于限频
     deliverBusy: false,          // 发货流程互斥
@@ -645,6 +647,26 @@
     }
   }
 
+  /**
+   * 记一次"未定位到买家会话"。刚刷新页面/骨架屏/搜索渲染慢时瞬时失败很常见、
+   * 下轮自动重试即可——连续失败 ≥3 轮才值得喊人工，且同一订单 30 分钟内不重复喊，
+   * 避免"狼来了"式告警把真正需要处理的单淹没。
+   */
+  function noteConvLocateFail(order) {
+    const n = (state.convLocateFail[order.orderId] || 0) + 1;
+    state.convLocateFail[order.orderId] = n;
+    if (n < 3) {
+      log('info', `订单 ${order.orderId} 暂未定位到买家「${order.buyerNick}」的会话（第${n}次，列表可能还没加载完，下轮自动重试）`);
+      return;
+    }
+    log('warn', `订单 ${order.orderId}「${order.title}」待发货，连续${n}轮未找到买家「${order.buyerNick}」的会话，请人工发货`);
+    const last = state.manualAlertAt[order.orderId] || 0;
+    if (Date.now() - last > 30 * 60000) {
+      state.manualAlertAt[order.orderId] = Date.now();
+      notify('⚠️ 有单需人工发货', `未定位到买家 ${order.buyerNick} 的会话，「${order.title}」请手动发货`);
+    }
+  }
+
   // ---------- 接口驱动的自动发货 ----------
 
   /**
@@ -727,13 +749,10 @@
 
   /** 后端（MySQL）模式：取卡+扣库存+去重在数据库事务里完成，最安全 */
   async function deliverViaBackend(order, skuLabel, doneMark) {
-    // 先定位会话；找不到就不占用库存
+    // 先定位会话；找不到就不占用库存（瞬时失败下轮重试，连续失败才告警）
     const conv = await openConversationByNick(order.buyerNick);
-    if (!conv) {
-      log('warn', `订单 ${order.orderId}「${order.title}」待发货，但未找到买家「${order.buyerNick}」的会话，请人工发货`);
-      notify('⚠️ 有单需人工发货', `未定位到买家 ${order.buyerNick} 的会话，「${order.title}」请手动发货`);
-      return;
-    }
+    if (!conv) { noteConvLocateFail(order); return; }
+    delete state.convLocateFail[order.orderId];   // 定位成功，清失败计数
     try {
       // 注意：这里不再用"聊天里出现过发货标记"做去重——回头客的聊天里必然留着
       // 上一单的标记，会把新订单误判成已发货。去重完全交给后端（orderId 唯一约束，
@@ -820,11 +839,8 @@
       return;
     }
     const conv = await openConversationByNick(order.buyerNick);
-    if (!conv) {
-      log('warn', `订单 ${order.orderId}「${order.title}」待发货，但未找到买家「${order.buyerNick}」的会话，请人工发货`);
-      notify('⚠️ 有单需人工发货', `未定位到买家 ${order.buyerNick} 的会话，「${order.title}」请手动发货`);
-      return;
-    }
+    if (!conv) { noteConvLocateFail(order); return; }
+    delete state.convLocateFail[order.orderId];   // 定位成功，清失败计数
     try {
       // 缓存丢失（重装插件等）后的兜底去重：只认"发货标记 + 本订单号"同时出现。
       // 只认裸标记会把回头客的新订单误判成已发货（聊天里留着上一单的标记）

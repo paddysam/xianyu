@@ -368,6 +368,20 @@ const tgReply = (text, keyboard) => tgApi('sendMessage', {
   ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {})
 });
 
+/** 发一条消息并把它的 message_id 记进当前补货会话（入库成功/取消时统一删除，保持对话干净、不留卡密明文） */
+async function tgReplyTracked(text, keyboard) {
+  const r = await tgReply(text, keyboard);
+  const id = r && r.ok && r.result && r.result.message_id;
+  if (id && tgPending && Array.isArray(tgPending.msgIds)) tgPending.msgIds.push(id);
+  return r;
+}
+/** 批量删除消息（失败静默：太老的消息 TG 不允许删，忽略即可） */
+async function tgDeleteMsgs(ids) {
+  for (const id of (ids || [])) {
+    if (id) await tgApi('deleteMessage', { chat_id: TG_CHAT, message_id: id });
+  }
+}
+
 async function tgStockText() {
   const [rows] = await pool.query(`
     SELECT p.*, (SELECT COUNT(*) FROM cards c WHERE c.product_id=p.id AND c.status='available') AS stock
@@ -418,21 +432,27 @@ async function tgHandleCallback(cb) {
     if (!rows.length) return tgReply('这个商品不存在了，重新点「➕ 补货」选一次。');
     const p = rows[0];
     const label = `#${p.id} ${p.match_title}${p.spec ? ' / ' + p.spec : ''} ¥${p.price || '?'}`;
-    tgPending = { stage: 'await_cards', productId: p.id, label, cards: [], ts: Date.now() };
-    return tgReply(`好，给「${label}」补货。\n\n现在把卡密发给我：一条消息里每行一张。`,
+    // msgIds 从选商品那条消息开始记（cb.message 就是它），入库/取消时一起删干净
+    const pickerMsgId = cb.message && cb.message.message_id;
+    tgPending = { stage: 'await_cards', productId: p.id, label, cards: [], ts: Date.now(), msgIds: pickerMsgId ? [pickerMsgId] : [] };
+    return tgReplyTracked(`好，给「${label}」补货。\n\n现在把卡密发给我：一条消息里每行一张。`,
       [[{ text: '❌ 取消补货', callback_data: 'cancel' }]]);
   }
   if (data === 'confirm') {
     if (!tgPendingFresh() || tgPending.stage !== 'await_confirm') { tgPending = null; return tgReply('这次补货已过期或已处理，重新点「➕ 补货」来一次。'); }
-    const { productId, label, cards } = tgPending;
+    const { productId, label, cards, msgIds } = tgPending;
     tgPending = null;
     await pool.query('INSERT INTO cards (product_id, secret) VALUES ?', [cards.map(s => [productId, s])]);
     const [[cnt]] = await pool.query(
       `SELECT COUNT(*) AS n FROM cards WHERE product_id=? AND status='available'`, [productId]);
+    // 删掉补货过程的中间消息（含明文卡密的核对预览、你粘贴的卡密），只留这条成功回执
+    await tgDeleteMsgs(msgIds);
     return tgReply(`✅ 入库成功：${cards.length} 张 → ${label}\n现在库存：${cnt.n} 张`);
   }
   if (data === 'cancel') {
+    const ids = tgPending && tgPending.msgIds;
     tgPending = null;
+    await tgDeleteMsgs(ids);   // 取消也清掉中间消息（尤其是含卡密的那些）
     return tgReply('已取消，没有入库任何卡密。');
   }
   // 飞机点「发货」→ 排一条远程发货指令，插件轮询取走执行（订单号唯一，重复点不会重排）
@@ -449,14 +469,21 @@ async function tgHandleCallback(cb) {
   }
 }
 
-async function tgHandleText(text) {
+async function tgHandleText(text, msgId) {
   const raw = String(text || '').trim();
-  if (/^取消$/.test(raw)) { tgPending = null; return tgReply('已取消。'); }
+  if (/^取消$/.test(raw)) {
+    const ids = tgPending && tgPending.msgIds;
+    tgPending = null;
+    await tgDeleteMsgs(ids);
+    return tgReply('已取消。');
+  }
 
   // 补货第二步：正在等卡密 → 这条消息的每一行都是一张卡，回显预览等确认
   if (tgPendingFresh() && tgPending.stage === 'await_cards') {
+    // 你粘贴的卡密消息含明文密码 → 记下 id，入库/取消时删除，不留在对话里
+    if (msgId) tgPending.msgIds.push(msgId);
     const cards = raw.split('\n').map(s => s.trim()).filter(Boolean);
-    if (!cards.length) return tgReply('没读到内容，每行一张卡密再发一次。',
+    if (!cards.length) return tgReplyTracked('没读到内容，每行一张卡密再发一次。',
       [[{ text: '❌ 取消补货', callback_data: 'cancel' }]]);
     // 查重：同商品库里已有完全相同的卡密 → 提醒（防手滑重复粘贴）
     const [dups] = await pool.query(
@@ -467,7 +494,7 @@ async function tgHandleText(text) {
     tgPending.ts = Date.now();
     const preview = cards.length <= 5 ? cards.join('\n')
       : cards.slice(0, 3).join('\n') + `\n…（共 ${cards.length} 张）…\n` + cards[cards.length - 1];
-    return tgReply(
+    return tgReplyTracked(
       `请核对后确认入库：\n商品：${tgPending.label}\n数量：${cards.length} 张\n` +
       (dups.length ? `\n⚠️ 注意：有 ${dups.length} 张和库里已有卡密完全相同（可能重复粘贴了）\n` : '') +
       `\n${preview}`,
@@ -494,7 +521,7 @@ async function tgPollLoop() {
           tgOffset = u.update_id + 1;
           // 只认店主本人：消息看 chat.id，按钮回调看 from.id，其他人一律忽略
           if (u.message && u.message.text && String(u.message.chat && u.message.chat.id) === TG_CHAT) {
-            try { await tgHandleText(u.message.text); }
+            try { await tgHandleText(u.message.text, u.message.message_id); }
             catch (e) { tgReply('处理出错：' + e.message); }
           } else if (u.callback_query && String(u.callback_query.from && u.callback_query.from.id) === TG_CHAT) {
             try { await tgHandleCallback(u.callback_query); }

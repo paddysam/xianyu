@@ -262,7 +262,7 @@ $('loadSkus').addEventListener('click', async () => {
     if (!injResult.skus.length) {
       res.textContent = '接口暂无可识别的规格（可能近期没有订单），可先手动添加规则';
     } else {
-      res.textContent = `识别到 ${injResult.skus.length} 个商品规格，点「配置发货」即可添加`;
+      res.textContent = `识别到 ${injResult.skus.length} 个商品规格（扫描了最近 ${injResult.scanned || '?'} 单历史订单），点「配置发货」即可添加`;
     }
   } catch (e) {
     res.className = 'err';
@@ -270,49 +270,59 @@ $('loadSkus').addEventListener('click', async () => {
   }
 });
 
-/** 注入到工作台页面主世界执行：调订单接口，返回去重后的「商品+规格+价格」 */
+/**
+ * 注入到工作台页面主世界执行：翻页扫最近 400 单历史订单，返回去重后的「商品+规格+价格」。
+ * 只扫第一页会漏掉被热销款刷屏挤出去的老规格（如偶尔才出一单的 SKU）。
+ */
 function fetchSkusInPage() {
   return (async () => {
     try {
       if (!(window.lib && window.lib.mtop && window.lib.mtop.request)) {
         return { ok: false, error: '页面未就绪或不是卖家工作台，请在 seller.goofish.com 已登录页面上操作' };
       }
-      const res = await window.lib.mtop.request({
-        api: 'mtop.taobao.idle.trade.merchant.sold.get',
-        v: '1.0',
-        data: { tabCode: 'waitSellerSend', pageNumber: 1, pageSize: 50 }
-      });
-      if (!(res && res.ret && String(res.ret[0] || '').includes('SUCCESS'))) {
-        return { ok: false, error: '订单接口返回异常：' + (res && res.ret) };
-      }
-      let arr = null;
-      (function f(o, d) {
-        if (!o || typeof o !== 'object' || d > 6 || arr) return;
-        if (Array.isArray(o) && o.length && o[0] && o[0].commonData) { arr = o; return; }
-        for (const k in o) if (o[k] && typeof o[k] === 'object') f(o[k], d + 1);
-      })(res.data, 0);
       const seen = new Map();
-      for (const o of (arr || [])) {
-        const iv = o.itemVO || {}, pv = o.priceVO || {};
-        const lines = [];
-        (function w(x) {
-          if (!x) return;
-          if (Array.isArray(x)) { x.forEach(w); return; }
-          if (typeof x === 'object') for (const k in x) {
-            const v = x[k];
-            if (typeof v === 'string' && v.trim()) lines.push(v.trim());
-            else if (typeof v === 'object') w(v);
-          }
-        })(iv.itemInfoLines);
-        let spec = '';
-        const gi = lines.indexOf('规格');
-        if (gi >= 0 && lines[gi + 1]) spec = lines[gi + 1];
-        const price = String(pv.auctionPrice || pv.totalPrice || '');
-        const title = String(iv.title || '');
-        const key = title + '|' + spec + '|' + price;
-        if (title && !seen.has(key)) seen.set(key, { title, spec, price });
+      let scanned = 0;
+      for (let page = 1; page <= 8; page++) {
+        const res = await window.lib.mtop.request({
+          api: 'mtop.taobao.idle.trade.merchant.sold.get',
+          v: '1.0',
+          data: { tabCode: 'all', pageNumber: page, pageSize: 50 }
+        });
+        if (!(res && res.ret && String(res.ret[0] || '').includes('SUCCESS'))) {
+          if (page === 1) return { ok: false, error: '订单接口返回异常：' + (res && res.ret) };
+          break; // 后续页失败不影响已扫到的
+        }
+        let arr = null;
+        (function f(o, d) {
+          if (!o || typeof o !== 'object' || d > 6 || arr) return;
+          if (Array.isArray(o) && o.length && o[0] && o[0].commonData) { arr = o; return; }
+          for (const k in o) if (o[k] && typeof o[k] === 'object') f(o[k], d + 1);
+        })(res.data, 0);
+        if (!arr || !arr.length) break;
+        scanned += arr.length;
+        for (const o of arr) {
+          const iv = o.itemVO || {}, pv = o.priceVO || {};
+          const lines = [];
+          (function w(x) {
+            if (!x) return;
+            if (Array.isArray(x)) { x.forEach(w); return; }
+            if (typeof x === 'object') for (const k in x) {
+              const v = x[k];
+              if (typeof v === 'string' && v.trim()) lines.push(v.trim());
+              else if (typeof v === 'object') w(v);
+            }
+          })(iv.itemInfoLines);
+          let spec = '';
+          const gi = lines.indexOf('规格');
+          if (gi >= 0 && lines[gi + 1]) spec = lines[gi + 1];
+          const price = String(pv.auctionPrice || pv.totalPrice || '');
+          const title = String(iv.title || '');
+          const key = title + '|' + spec + '|' + price;
+          if (title && !seen.has(key)) seen.set(key, { title, spec, price });
+        }
+        if (arr.length < 50) break; // 不足一页 = 已到历史尽头
       }
-      return { ok: true, skus: [...seen.values()] };
+      return { ok: true, skus: [...seen.values()], scanned };
     } catch (e) {
       return { ok: false, error: String(e && e.message || e) };
     }

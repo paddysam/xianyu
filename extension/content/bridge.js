@@ -57,12 +57,15 @@
     };
   }
 
-  async function fetchSoldList() {
+  async function fetchSoldList(maxPages) {
     if (!ready()) throw new Error('页面 mtop 库未就绪');
-    // 翻页拉取：积压超一页时，后面的单子也能轮到（上限 3 页防止极端情况拖垮轮询）
-    const PAGE_SIZE = 50, MAX_PAGES = 3;
+    // 订单接口偶尔慢到 4~6 秒/页，翻多页会长时间占住发货锁把轮询和手动发货都拖死。
+    // 默认只拉第 1 页（待发货订单都在最前，50 条足够）；只有一页拿满(=可能有积压)才续拉，
+    // 上限 2 页封顶。maxPages 可显式指定（手动发货只查当前买家，传 1）。
+    const PAGE_SIZE = 50;
+    const MAX = Math.max(1, Math.min(Number(maxPages) || 2, 2));
     const out = [];
-    for (let page = 1; page <= MAX_PAGES; page++) {
+    for (let page = 1; page <= MAX; page++) {
       const res = await window.lib.mtop.request({
         api: 'mtop.taobao.idle.trade.merchant.sold.get',
         v: '1.0',
@@ -85,9 +88,9 @@
     return out;
   }
 
-  /** 拉取"待发货"订单（发货流程用） */
-  async function fetchWaitShipOrders() {
-    return fetchSoldList();
+  /** 拉取"待发货"订单（发货流程用；payload.maxPages 传 1 只查第一页更快） */
+  async function fetchWaitShipOrders(payload) {
+    return fetchSoldList(payload && payload.maxPages);
   }
 
   /** 列出订单里出现过的所有「商品+规格+价格」组合（设置页选择用，避免手输出错） */

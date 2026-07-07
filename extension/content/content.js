@@ -681,19 +681,23 @@
     const wantPush = tgPushOn();
     const wantDeliver = state.settings.autoDeliver !== false;
     if (!wantPush && !wantDeliver) return;
+    // 关键：拉订单是只读的，不占发货锁——订单接口偶尔慢到几秒，占着锁会把手动发货也拖死。
+    // 只有真要"自动发卡"时（wantDeliver）才在发送前抢锁。纯推送不碰锁。
+    let orders;
+    try {
+      orders = await bridge.call('fetchWaitShipOrders', { maxPages: wantDeliver ? 2 : 1 }, 15000);
+    } catch (e) {
+      log('warn', '拉取待发货订单失败（稍后重试）: ' + (e && e.message));
+      return;
+    }
+    if (!Array.isArray(orders) || !orders.length) return;
+    if (wantPush) await tgNotifyNewOrders(orders);   // 新付款订单先推 Telegram（每单一次，不碰界面）
+    if (!wantDeliver) return;                          // 只要推送不要自动发货（全手动模式）：到此为止
+
+    // —— 到这里才真正要自动发卡：抢锁，只在发送期间互斥 ——
+    if (state.deliverBusy) return;                     // 手动发货正占着 → 本轮让它先
     state.deliverBusy = true;
     try {
-      let orders;
-      try {
-        orders = await bridge.call('fetchWaitShipOrders');
-      } catch (e) {
-        log('warn', '拉取待发货订单失败（稍后重试）: ' + (e && e.message));
-        return;
-      }
-      if (!Array.isArray(orders) || !orders.length) return;
-      if (wantPush) await tgNotifyNewOrders(orders);   // 新付款订单先推 Telegram（每单一次，不碰界面）
-
-      if (!wantDeliver) return;   // 只要推送不要自动发货（全手动模式）：到此为止
       // 自动发货要点开买家会话（会切走你正看的窗口）→ 你在操作时暂缓并提醒
       if (userActive()) {
         if (Date.now() - state.lastDeferNoticeAt > 120000) {
@@ -1588,39 +1592,23 @@
     }
     const btn = document.getElementById('__xy_deliver_btn');
     const oldText = btn ? btn.textContent : '';
-    // 互斥：订单监控每5秒就要拉一次接口（飞机推送发现新单也靠它），会占这把锁1~3秒，
-    // 随手一点撞上的概率不小——撞上就自动等它腾出来（按钮已禁点，不会重复触发），
-    // 而不是弹窗让你自己重试
-    if (state.deliverBusy) {
-      if (btn) { btn.textContent = '⏳ 等待后台空闲…'; btn.style.pointerEvents = 'none'; btn.style.opacity = '.7'; }
-      const free = await waitFor(() => !state.deliverBusy, 15000);
-      if (!free) {
-        if (btn) { btn.textContent = oldText; btn.style.pointerEvents = ''; btn.style.opacity = ''; }
-        alert('后台发货通道占用超过15秒（可能网络卡顿），请稍后再点一次');
-        return;
-      }
-    }
-    state.deliverBusy = true;
+    const restoreBtn = () => { if (btn) { btn.textContent = oldText; btn.style.pointerEvents = ''; btn.style.opacity = ''; } };
     if (btn) { btn.textContent = '⏳ 正在核对订单…'; btn.style.pointerEvents = 'none'; btn.style.opacity = '.7'; }
     try {
-      // 对称互斥：deliverBusy 已占锁挡住"新的 tick"，但可能有一轮 tick 正在跑
-      // （自动回复中途会切会话、写输入框）。等它收尾再动手，否则两边互相清空输入框
-      if (state.busy) {
-        if (btn) btn.textContent = '⏳ 等待自动流程让位…';
-        if (!(await waitFor(() => !state.busy, 15000))) {
-          alert('自动客服正忙（自动回复未结束），请几秒后再点一次'); return;
-        }
-        if (btn) btn.textContent = '⏳ 正在核对订单…';
-      }
+      // 关键：查订单是只读的，不占发货锁（订单接口偶尔慢到几秒，占锁会把自己和轮询都拖死）。
+      // 只查第一页（当前买家的待发货单必在最前），发卡那一步才需要互斥锁。
       let orders;
       try {
-        orders = await bridge.call('fetchWaitShipOrders');
+        orders = await bridge.call('fetchWaitShipOrders', { maxPages: 1 }, 15000);
       } catch (e) {
-        alert('拉取订单失败：' + (e && e.message) + '\n请确认工作台已登录后重试'); return;
+        restoreBtn();
+        alert('拉取订单失败：' + (e && e.message) + '\n（订单接口偶尔较慢，请再点一次；确认工作台已登录）');
+        return;
       }
       const { forBuyer, pending, todo } = pickDeliverableOrders(orders, nick, state.deliveredOrders);
       // 权威判断：这个买家有没有"待发货且未退款"的订单
       if (!pending.length) {
+        restoreBtn();
         if (forBuyer.some(o => o.inRefund))
           alert(`买家「${nick}」的订单正在退款中，未发货。`);
         else
@@ -1629,30 +1617,43 @@
       }
       // 已发过的（缓存里有）过滤掉，避免重复
       if (!todo.length) {
+        restoreBtn();
         alert(`买家「${nick}」这些订单都已经发过货了，未重复发送。`); return;
       }
+      // 到这里才真正要发卡——现在才抢锁，只在"发送"期间互斥，等待很短（查询已在锁外做完）
+      if (btn) btn.textContent = '⏳ 等待发货通道…';
+      if (!(await waitFor(() => !state.deliverBusy && !state.busy, 20000))) {
+        restoreBtn();
+        alert('发货通道一直忙（订单接口较慢），请过几秒再点一次');
+        return;
+      }
+      state.deliverBusy = true;
+      if (btn) btn.textContent = '⏳ 正在发货…';
+      try {
       if (todo.length > 1 &&
           !confirm(`买家「${nick}」有 ${todo.length} 个待发货订单，确认全部发货？`)) return;
 
-      let ok = 0, fail = 0;
-      for (const order of todo) {
-        await deliverOrder(order);                       // 与自动发货同一条安全路径
-        if (state.deliveredOrders[order.orderId]) ok++; else fail++;
-        await sleep(rand(600, 1200));
+        let ok = 0, fail = 0;
+        for (const order of todo) {
+          await deliverOrder(order);                     // 与自动发货同一条安全路径
+          if (state.deliveredOrders[order.orderId]) ok++; else fail++;
+          await sleep(rand(600, 1200));
+        }
+        if (ok && !fail) alert(`✓ 已给「${nick}」发货成功（${ok} 单）`);
+        else if (ok && fail) alert(`部分完成：成功 ${ok} 单，${fail} 单未完成（原因见插件弹窗「运行日志」）`);
+        else alert(
+          '发货未完成，可能原因：\n' +
+          '· 输入框有草稿 / 会话被切走 → 发送被安全拦截，库存已自动回滚，处理后再点一次即可\n' +
+          '· 库存缺货 / 没匹配的发货规则 → 需补货或人工发\n' +
+          '具体哪一种，点插件图标看「运行日志」最后几条。');
+      } finally {
+        state.deliverBusy = false;   // 只释放"发送期"的锁（查询本就没占锁）
       }
-      if (ok && !fail) alert(`✓ 已给「${nick}」发货成功（${ok} 单）`);
-      else if (ok && fail) alert(`部分完成：成功 ${ok} 单，${fail} 单未完成（原因见插件弹窗「运行日志」）`);
-      else alert(
-        '发货未完成，可能原因：\n' +
-        '· 输入框有草稿 / 会话被切走 → 发送被安全拦截，库存已自动回滚，处理后再点一次即可\n' +
-        '· 库存缺货 / 没匹配的发货规则 → 需补货或人工发\n' +
-        '具体哪一种，点插件图标看「运行日志」最后几条。');
     } catch (e) {
       log('error', '手动发货异常: ' + (e && e.message));
       alert('发货出错：' + (e && e.message));
     } finally {
-      state.deliverBusy = false;
-      if (btn) { btn.textContent = oldText; btn.style.pointerEvents = ''; btn.style.opacity = ''; }
+      restoreBtn();
     }
   }
 

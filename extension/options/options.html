@@ -263,6 +263,23 @@
       </div>
       <div class="card">
         <div class="card-head">
+          <h2>Telegram 推送（有单提醒到手机）</h2>
+          <p>有人下单付款、需要人工处理、工作台掉线时，推送到你自己的 Telegram。
+             只会发给下面这个 Chat ID（即你自己），不会推给任何别人。</p>
+        </div>
+        <label>Bot Token（@BotFather 创建机器人时给的）
+          <input id="tgBotToken" type="password" autocomplete="off" placeholder="123456789:AA...">
+        </label>
+        <label>Chat ID（你的账号 ID：先给你的机器人发一条消息，再用 getUpdates 里的 chat.id）
+          <input id="tgChatId" placeholder="如 123456789">
+        </label>
+        <div class="inline-actions">
+          <button id="testTg" class="btn secondary">发送测试推送</button>
+          <span id="tgResult" role="status"></span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head">
           <h2>选择器覆盖</h2>
           <p>闲鱼页面改版导致插件失效时，在此用 JSON 覆盖默认选择器（键名见 content/selectors.js），留空使用默认。</p>
         </div>

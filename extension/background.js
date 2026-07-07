@@ -46,6 +46,9 @@ const DEFAULT_SETTINGS = {
   // 本地后端（MySQL）：填了就用数据库存卡密/发货记录/知识库，留空则用浏览器本地存储
   backendUrl: '',               // 如 http://127.0.0.1:8788
   backendToken: '',             // 与后端 .env 的 AUTH_TOKEN 一致（后端留空则此处也留空）
+  // Telegram 推送：两项都填了才启用；只发给 tgChatId 这一个人（即你自己）
+  tgBotToken: '',               // @BotFather 创建机器人给的 token
+  tgChatId: '',                 // 你的账号 chat id（先给机器人发条消息才能拿到）
   deliveryDoneMark: '【自动发货】',
   // 全局发货话术模板：商品规则里没单独填模板时使用，{卡密} 为占位符
   deliveryTemplate:
@@ -184,6 +187,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'NOTIFY':
           notify(msg.title, msg.message);
           sendResponse({ ok: true });
+          break;
+        case 'TG_PUSH':
+          sendResponse(await pushTelegram(msg.text));
           break;
         case 'BACKEND_FETCH':
           sendResponse(await backendFetch(msg));
@@ -341,4 +347,38 @@ function notify(title, message) {
       priority: 2
     });
   } catch (_) { /* 通知权限被拒时忽略 */ }
+  // 桌面通知同时抄送 Telegram（配置了才发）——离开电脑也能收到"需人工/掉线"提醒
+  pushTelegram((title || '闲鱼智能客服') + '\n' + (message || '')).catch(() => {});
+}
+
+/**
+ * 推送到 Telegram（只发给 settings.tgChatId 这一个账号）。
+ * 带一个"打开工作台"按钮，手机上点开也能看；在电脑上点开即可直接发货。
+ * 未配置 token/chatId 时静默跳过。返回 { ok, error? }
+ */
+async function pushTelegram(text) {
+  const { settings = {} } = await chrome.storage.local.get('settings');
+  const token = (settings.tgBotToken || '').trim();
+  const chatId = String(settings.tgChatId || '').trim();
+  if (!token || !chatId) return { ok: false, error: '未配置 Telegram' };
+  try {
+    const resp = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: String(text || '').slice(0, 3800),
+        reply_markup: {
+          inline_keyboard: [[{ text: '🖥 打开卖家工作台', url: 'https://seller.goofish.com/?site=COMMONPRO#/im' }]]
+        }
+      })
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok === false) {
+      return { ok: false, error: (data && data.description) || ('HTTP ' + resp.status) };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message || e) };
+  }
 }

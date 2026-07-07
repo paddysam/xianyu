@@ -30,6 +30,7 @@
     busy: false,                // 正在处理某个会话
     baseline: new Map(),        // convKey -> lastMsg 快照
     deliveredOrders: {},         // orderId -> {ts, card, title, buyer} 已发货订单（持久化去重）
+    tgNotified: {},              // orderId -> ts 已推送过 Telegram"新订单"的单（持久化去重，防重复推）
     humanHandoff: {},            // convKey -> ts 转人工接管中的会话（持久化）
     replyTimestamps: new Map(), // convKey -> [ts, ...] 用于限频
     deliverBusy: false,          // 发货流程互斥
@@ -613,6 +614,25 @@
     }
   }
 
+  /** 推送一条 Telegram（后台代发，未配置时后台会静默跳过） */
+  function tgPush(text) {
+    try { chrome.runtime.sendMessage({ type: 'TG_PUSH', text }, () => { void chrome.runtime.lastError; }); } catch (_) {}
+  }
+
+  /** 对刚发现的"新付款订单"推送 Telegram 提醒（每单只推一次，持久化去重） */
+  async function tgNotifyNewOrders(orders) {
+    const fresh = (Array.isArray(orders) ? orders : []).filter(o =>
+      o.orderStatus === '待发货' && !o.inRefund &&
+      !state.deliveredOrders[o.orderId] && !state.tgNotified[o.orderId]);
+    for (const o of fresh) {
+      state.tgNotified[o.orderId] = Date.now();
+      tgPush(`🛒 新订单已付款\n买家：${o.buyerNick}\n商品：${o.title}${o.spec ? ' / ' + o.spec : ''}  ¥${o.price}\n订单号：${o.orderId}\n\n若可自动发货会随后提示"已发货"；缺货/需人工会单独提醒。`);
+    }
+    if (fresh.length) {
+      try { await chrome.storage.local.set({ tgNotified: state.tgNotified }); } catch (_) {}
+    }
+  }
+
   // ---------- 接口驱动的自动发货 ----------
 
   /**
@@ -631,6 +651,7 @@
         return;
       }
       if (!Array.isArray(orders) || !orders.length) return;
+      await tgNotifyNewOrders(orders);   // 新付款订单先推 Telegram（每单一次）
 
       for (const order of orders) {
         // —— 逐层硬校验，任一不满足就跳过 ——
@@ -711,6 +732,7 @@
             await rememberDelivered(order);
             bumpStat('deliveriesSent');
             log('info', `已发货：订单 ${order.orderId}「${skuLabel}」→ ${order.buyerNick}，剩余库存 ${r.stockLeft}`);
+            tgPush(`✅ 已自动发货\n买家：${order.buyerNick}\n商品：${skuLabel}\n剩余库存：${r.stockLeft}${r.stockLeft <= 2 ? '（⚠️ 该补货了）' : ''}`);
             await autoConsign(order, skuLabel); // 点亮订单发货，闭环
           } else {
             // 聊天发送失败 → 回滚数据库，恢复卡密，下轮重试
@@ -790,6 +812,8 @@
         bumpStat('deliveriesSent');
         log('info', `已发货：订单 ${order.orderId}「${skuLabel}」→ ${order.buyerNick}` +
           (prepared.card ? `，剩余库存 ${rule.cards.length}` : ''));
+        tgPush(`✅ 已自动发货\n买家：${order.buyerNick}\n商品：${skuLabel}` +
+          (prepared.card ? `\n剩余库存：${rule.cards.length}${rule.cards.length <= 2 ? '（⚠️ 该补货了）' : ''}` : ''));
         await autoConsign(order, skuLabel); // 点亮订单发货，闭环
       } else {
         log('error', `订单 ${order.orderId} 发送失败，未扣库存，下轮重试`);
@@ -1097,6 +1121,7 @@
             // 只在确实有待发货订单时才提醒，避免空扰
             try {
               const orders = await bridge.call('fetchWaitShipOrders');
+              await tgNotifyNewOrders(orders);   // 暂缓期间发现的新单也要推 Telegram
               const waiting = (Array.isArray(orders) ? orders : []).filter(o =>
                 o.orderStatus === '待发货' && !o.inRefund && !state.deliveredOrders[o.orderId]);
               if (waiting.length) {
@@ -1150,7 +1175,7 @@
   // ---------- 启动 / 停止 ----------
 
   async function loadConfig() {
-    const data = await chrome.storage.local.get(['settings', 'kb', 'products', 'deliveredOrders', 'humanHandoff', 'humanReplyAt', 'botMuted', 'humanQA']);
+    const data = await chrome.storage.local.get(['settings', 'kb', 'products', 'deliveredOrders', 'humanHandoff', 'humanReplyAt', 'botMuted', 'humanQA', 'tgNotified']);
     state.settings = data.settings || {};
     state.kb = data.kb || { entries: [], knowledgeText: '' };
     state.products = data.products || [];
@@ -1158,6 +1183,7 @@
     state.humanHandoff = data.humanHandoff || {};
     state.humanReplyAt = data.humanReplyAt || {};
     state.botMuted = data.botMuted || {};
+    state.tgNotified = data.tgNotified || {};
     state.humanQA = data.humanQA || [];
     state.S = window.__XY_MERGE_SELECTORS(state.settings.selectorOverrides);
 

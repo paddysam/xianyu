@@ -8,7 +8,7 @@ const SETTING_FIELDS = [
   'maxRepliesPerConvPerHour', 'styleSampleCount', 'deliveryDoneMark', 'deliveryTemplate',
   'botReplyMark', 'botReplyMarkPosition',
   'humanHandoffReply', 'humanHandoffCooldownMinutes', 'humanTakeoverMinutes',
-  'backendUrl', 'backendToken', 'consignText', 'riskReply'
+  'backendUrl', 'backendToken', 'consignText', 'riskReply', 'tgBotToken', 'tgChatId'
 ];
 const NUM_FIELDS = new Set([
   'temperature', 'maxTokens', 'replyDelayMinMs', 'replyDelayMaxMs',
@@ -660,6 +660,26 @@ $('save').addEventListener('click', async () => {
   } catch (e) {
     res.className = 'err';
     res.textContent = '保存失败: ' + e.message;
+  }
+});
+
+// ---------- 测试 Telegram 推送 ----------
+$('testTg').addEventListener('click', async () => {
+  const res = $('tgResult');
+  res.className = '';
+  const token = $('tgBotToken').value.trim(), chatId = $('tgChatId').value.trim();
+  if (!token || !chatId) { res.className = 'err'; res.textContent = '请先填 Bot Token 和 Chat ID'; return; }
+  res.textContent = '发送中…';
+  // 用当前表单值临时存一份调用，测完还原（测试不等于保存）
+  const { settings = {} } = await chrome.storage.local.get('settings');
+  const tmp = { ...settings, tgBotToken: token, tgChatId: chatId };
+  await chrome.storage.local.set({ settings: tmp });
+  try {
+    const r = await chrome.runtime.sendMessage({ type: 'TG_PUSH', text: '✅ 测试推送成功！\n闲鱼助手的订单提醒将发到这里。' });
+    if (r && r.ok) { res.textContent = '✓ 已发送，去 Telegram 看一眼'; }
+    else { res.className = 'err'; res.textContent = '✗ 发送失败：' + (r && r.error || '无响应') + '（检查 Token/Chat ID 是否正确、是否已给机器人发过消息）'; }
+  } finally {
+    await chrome.storage.local.set({ settings });
   }
 });
 

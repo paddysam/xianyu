@@ -722,8 +722,10 @@
         await backend.resolveDeliverCommand(oid, 'failed', '订单已不在待发货（已发/退款/超时？）').catch(() => {});
         continue;
       }
-      // 真正发卡：抢锁，只在发送期间互斥
-      if (state.deliverBusy || state.busy) return;   // 通道忙 → 本轮到此，下轮继续
+      // 真正发卡：抢锁，只在发送期间互斥。
+      // 注意只查 deliverBusy——本函数就跑在 tick 里，state.busy 此刻必然为 true，
+      // 拿它当条件等于永远不执行（之前的 bug：远程指令只会被标记、从不真发货）
+      if (state.deliverBusy) return;                 // 发货通道被占（如手动发货中）→ 下轮继续
       state.deliverBusy = true;
       try { await deliverOrder(order); }
       finally { state.deliverBusy = false; }

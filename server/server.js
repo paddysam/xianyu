@@ -14,6 +14,7 @@ const cors = require('cors');
 require('dotenv').config();
 const pool = require('./db');
 
+const path = require('path');
 const app = express();
 app.use(cors());                       // 允许插件跨源调用
 app.use(express.json({ limit: '2mb' }));
@@ -21,9 +22,13 @@ app.use(express.json({ limit: '2mb' }));
 const AUTH_TOKEN = (process.env.AUTH_TOKEN || '').trim();
 const PORT = Number(process.env.PORT || 8788);
 
+// 公开页面（无需鉴权）——放在鉴权中间件之前
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));          // 产品介绍首页
+app.get('/privacy', (req, res) => res.sendFile(path.join(__dirname, 'privacy.html'))); // 隐私政策（商店要求）
+
 // 简单令牌校验（AUTH_TOKEN 为空则跳过）
 app.use((req, res, next) => {
-  if (req.path === '/api/health') return next();
+  if (req.path === '/' || req.path === '/api/health' || req.path === '/privacy') return next();
   if (!AUTH_TOKEN) return next();
   if (req.get('X-Auth-Token') === AUTH_TOKEN) return next();
   res.status(401).json({ ok: false, error: 'unauthorized' });

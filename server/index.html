@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>闲鱼卖家助手 · 自动回复与自动发货</title>
+<meta name="description" content="闲鱼网页版卖家工具：自动回复买家、AI 智能客服、付款后按库存自动发货。数据只存本地，无需服务器。">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;color:#1e2430;line-height:1.6;background:#fff}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 22px}
+  /* hero */
+  .hero{background:linear-gradient(135deg,#fff9d6 0%,#fff 60%);padding:70px 0 60px}
+  .badge{display:inline-block;background:#ffe600;color:#1a1a1a;font-weight:800;font-size:14px;padding:7px 16px;border-radius:20px}
+  h1{font-size:46px;line-height:1.15;letter-spacing:-1px;margin:20px 0 16px}
+  h1 span{color:#e6a700}
+  .lead{font-size:20px;color:#5b6472;max-width:640px}
+  .cta{margin-top:30px;display:flex;gap:14px;flex-wrap:wrap}
+  .btn{display:inline-block;background:#1a1a1a;color:#fff;font-weight:700;font-size:16px;padding:13px 28px;border-radius:12px;text-decoration:none}
+  .btn.y{background:#ffe600;color:#1a1a1a}
+  /* features */
+  section{padding:56px 0}
+  h2{font-size:30px;text-align:center;margin-bottom:8px}
+  .sub{text-align:center;color:#8a929e;font-size:17px;margin-bottom:40px}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+  .card{background:#fafbfc;border:1px solid #eef0f3;border-radius:16px;padding:26px}
+  .card .ic{font-size:32px}
+  .card h3{font-size:20px;margin:14px 0 8px}
+  .card p{color:#6b7280;font-size:15px}
+  /* steps */
+  .steps{background:#f7f8fa}
+  .step{display:flex;gap:18px;align-items:flex-start;max-width:720px;margin:0 auto 22px}
+  .num{width:40px;height:40px;border-radius:12px;background:#ffe600;color:#1a1a1a;font-weight:800;display:grid;place-items:center;flex:none;font-size:18px}
+  .step b{font-size:18px}
+  .step p{color:#6b7280;font-size:15px}
+  /* safe */
+  .safe{max-width:760px;margin:0 auto;background:#fffbe6;border:1px solid #ffe600;border-radius:14px;padding:22px 26px;font-size:16px;color:#4a4300;text-align:center}
+  footer{border-top:1px solid #eef0f3;padding:30px 0;color:#9aa3b2;font-size:14px;text-align:center}
+  footer a{color:#6b7280}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}h1{font-size:34px}}
+</style>
+</head>
+<body>
+  <div class="hero"><div class="wrap">
+    <span class="badge">闲鱼网页版 · 卖家工具</span>
+    <h1>闲鱼卖家助手<br><span>自动回复 · 自动发货</span></h1>
+    <p class="lead">买家来消息自动回复，付款后按你的库存自动发卡密。数据只存你自己浏览器，无需服务器，开箱即用。</p>
+    <div class="cta">
+      <a class="btn y" href="#features">了解功能</a>
+      <a class="btn" href="/privacy">隐私政策</a>
+    </div>
+  </div></div>
+
+  <section id="features"><div class="wrap">
+    <h2>核心功能</h2>
+    <p class="sub">让日常客服和发货自动跑起来</p>
+    <div class="grid">
+      <div class="card"><div class="ic">💬</div><h3>智能自动回复</h3><p>知识库关键词 + AI 生成，还能学习你本人的说话风格；识别引流、转人工场景妥当处理。</p></div>
+      <div class="card"><div class="ic">📦</div><h3>付款后自动发货</h3><p>按"商品 + 规格 + 价格"精确匹配发货规则，从卡密库存取一条发出，订单级去重，绝不重发错发。</p></div>
+      <div class="card"><div class="ic">🔒</div><h3>数据自主可控</h3><p>卡密与规则存在你自己的浏览器本地，或你自建的后端。作者没有服务器，不碰你任何数据。</p></div>
+      <div class="card"><div class="ic">📋</div><h3>库存总览</h3><p>每个规格放了多少、卖了多少、还剩多少一目了然，库存不足自动标红提醒补货。</p></div>
+      <div class="card"><div class="ic">📣</div><h3>Telegram 提醒（可选）</h3><p>有人下单、发货成功、缺货需人工，实时推到你自己的 Telegram，离开电脑也不错过。</p></div>
+      <div class="card"><div class="ic">🛡️</div><h3>拟人 · 防打扰</h3><p>随机延迟模拟人工、每会话限频；你在操作时机器人自动让位，不抢你正在打字的窗口。</p></div>
+    </div>
+  </div></section>
+
+  <section class="steps"><div class="wrap">
+    <h2>怎么用</h2>
+    <p class="sub">三步即可，普通用户无需服务器</p>
+    <div class="step"><div class="num">1</div><div><b>安装并打开设置</b><p>配置知识库、发货规则；卡密贴进库存即可，全部存在本地。</p></div></div>
+    <div class="step"><div class="num">2</div><div><b>打开自动客服</b><p>在闲鱼卖家工作台聊天页，点开总开关。</p></div></div>
+    <div class="step"><div class="num">3</div><div><b>坐等自动回复与发货</b><p>买家咨询自动回，付款后自动把卡密发出，你只需备货。</p></div></div>
+  </div></section>
+
+  <section><div class="wrap">
+    <div class="safe">🔒 <b>数据安全承诺</b>：本工具没有作者的服务器，不收集、不上传、不出售你的任何数据。卡密仅存你的本地或你自建的后端。</div>
+  </div></section>
+
+  <footer><div class="wrap">
+    闲鱼卖家助手 · 第三方工具，与闲鱼（阿里巴巴）无关，使用风险自担<br>
+    <a href="/privacy">隐私政策</a> · 联系：paddysam159@gmail.com · © 2026
+  </div></footer>
+</body>
+</html>

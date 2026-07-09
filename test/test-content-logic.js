@@ -39,7 +39,7 @@ const sandbox = {
   // 极简 document：只支持 querySelector(inputBox) 返回带 value 的假输入框
   document: { querySelector: (sel) => (sel === 'textarea' ? { value: fakeInputValue } : null) },
 };
-const fnNames = ['matchProduct', 'prepareDelivery', 'consumeCard', 'looksLikeCredential', 'replyDelay', 'buildDeliveryInfo', 'withBotMark', 'isMuted', 'setMuted', 'pickDeliverableOrders', 'userActive', 'noteConvLocateFail'];
+const fnNames = ['matchProduct', 'prepareDelivery', 'consumeCard', 'looksLikeCredential', 'replyDelay', 'buildDeliveryInfo', 'withBotMark', 'isMuted', 'setMuted', 'normNick', 'isMaskedNick', 'nickMatch', 'uniqueNickMatch', 'pickDeliverableOrders', 'userActive', 'noteConvLocateFail'];
 const code = fnNames.map(extract).join('\n\n');
 const vm = require('vm');
 vm.createContext(sandbox);
@@ -204,7 +204,39 @@ console.log('\n[C] consumeCard 扣库存');
   r2 = F.pickDeliverableOrders(null, '张三', {});
   eq('订单接口返回空 → 安全返回空，不报错', r2.todo.length, 0);
   r2 = F.pickDeliverableOrders([O({ orderId:'A', buyerNick:'王五' })], '张三', {});
-  eq('买家昵称对不上 → 不发（精确匹配，绝不发给差不多的人）', r2.todo.length, 0);
+  eq('普通昵称对不上 → 不发（未脱敏时仍需精确一致）', r2.todo.length, 0);
+
+  // ========== I2. 脱敏昵称匹配（闲鱼把买家名脱敏为 "一***啊"）==========
+  console.log('\n[I2] 脱敏昵称匹配 nickMatch / uniqueNickMatch');
+  // normNick
+  eq('去零宽字符', F.normNick('张​三'), '张三');
+  eq('去空白', F.normNick(' 张 三 '), '张三');
+  eq('全角数字/字母归一', F.normNick('ＡＢ１２'), 'AB12');
+  // isMaskedNick
+  eq('识别半角星号脱敏', F.isMaskedNick('一***啊'), true);
+  eq('识别全角星号脱敏', F.isMaskedNick('一＊＊＊啊'), true);
+  eq('普通昵称不算脱敏', F.isMaskedNick('一个随意啊'), false);
+  // nickMatch —— 核心：这就是本次线上 bug 的场景
+  eq('★脱敏中间: 一个随意啊 ~ 一***啊', F.nickMatch('一个随意啊', '一***啊'), true);
+  eq('参数顺序无关', F.nickMatch('一***啊', '一个随意啊'), true);
+  eq('全角星号也认', F.nickMatch('一个随意啊', '一＊＊＊啊'), true);
+  eq('完全相同', F.nickMatch('阿郎的鱼', '阿郎的鱼'), true);
+  eq('不同人不匹配', F.nickMatch('阿郎的鱼', '大哥脸红了'), false);
+  eq('脱敏但首尾对不上 → 不匹配', F.nickMatch('一个随意啊', '大***了'), false);
+  eq('整串脱敏(***) → 拒绝(太危险)', F.nickMatch('随便谁', '***'), false);
+  eq('两边都没脱敏且不等 → 不匹配', F.nickMatch('阿郎的鱼', '阿郎'), false);
+  // uniqueNickMatch —— 防误发的唯一性保护
+  const L = [{ name: '一个随意啊' }, { name: '大哥脸红了' }, { name: '泰迪队长' }];
+  eq('脱敏唯一命中 → 返回该会话', (F.uniqueNickMatch(L, '一***啊') || {}).name, '一个随意啊');
+  eq('脱敏多命中(歧义) → 返回 null 不乱发',
+    F.uniqueNickMatch([{ name: '一个随意啊' }, { name: '一二三四啊' }], '一***啊'), null);
+  eq('精确优先于脱敏', (F.uniqueNickMatch([{ name: '张三' }, { name: '张三丰' }], '张三') || {}).name, '张三');
+  eq('谁都不匹配 → null', F.uniqueNickMatch(L, '查无此人'), null);
+  // pickDeliverableOrders 端到端（本次 bug 的真实数据）
+  r2 = F.pickDeliverableOrders([O({ orderId:'A', buyerNick:'一***啊' })], '一个随意啊', {});
+  eq('★脱敏买家的待发货单能挑出来（修复点）', r2.todo.map(o=>o.orderId), ['A']);
+  r2 = F.pickDeliverableOrders([O({ orderId:'A', buyerNick:'一***啊', orderStatus:'已发货' })], '一个随意啊', {});
+  eq('脱敏但已发货 → 不重复发', r2.todo.length, 0);
 
   // ========== J. userActive：你在操作时机器人不抢屏 ==========
   console.log('\n[J] userActive 真人活动检测（防抢窗口）');

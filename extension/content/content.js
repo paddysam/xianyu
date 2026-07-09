@@ -21,6 +21,11 @@
 (() => {
   'use strict';
 
+  // 防重复注入：同一页面已加载过本脚本（如插件重载后又被注入）→ 直接退出，
+  // 避免两份脚本各跑一套定时器抢同一个悬浮按钮（症状：开关来回闪）。
+  if (window.__XY_CS_LOADED__) return;
+  window.__XY_CS_LOADED__ = true;
+
   const state = {
     settings: null,
     kb: null,
@@ -171,6 +176,48 @@
   function scanConvList() {
     return [...document.querySelectorAll(state.S.convItem)].map(parseConvItem)
       .filter(c => c.key && !SYSTEM_CONV_NAMES.includes(c.name));
+  }
+
+  // ---------- 昵称匹配（容忍闲鱼把买家昵称脱敏，如订单里的 "一***啊"）----------
+
+  /** 归一化：去零宽字符/所有空白 + 全角半角统一，避免"看着一样却 !==" */
+  function normNick(s) {
+    return String(s == null ? '' : s)
+      .replace(/[​‌‍﻿]/g, '')  // 零宽字符
+      .replace(/\s+/g, '')                         // 所有空白
+      .normalize('NFKC');                          // 全角/半角统一
+  }
+
+  /** 昵称是否被脱敏（含 * 掩码，半角/全角） */
+  function isMaskedNick(s) { return /[*＊]/.test(String(s == null ? '' : s)); }
+
+  /**
+   * 两个昵称是否指同一人；容忍其中一方被脱敏。
+   * 脱敏把中间几个字换成 *（如 "一***啊"）→ 转成通配符再和明文比。
+   * 安全：整串都是 * 的（如 "***"）拒绝匹配；真正防误发靠调用方的"唯一命中"约束。
+   */
+  function nickMatch(a, b) {
+    const na = normNick(a), nb = normNick(b);
+    if (!na || !nb) return false;
+    if (na === nb) return true;
+    const aM = isMaskedNick(na), bM = isMaskedNick(nb);
+    if (aM === bM) return false;                 // 都没脱敏(且不等) 或 都脱敏 → 不模糊匹配
+    const mask = aM ? na : nb;                    // 被脱敏的那个
+    const full = aM ? nb : na;                    // 明文那个
+    const parts = mask.split(/[*＊]+/);       // "一***啊" → ["一","啊"]
+    if (!parts.some(Boolean)) return false;       // 全是 * → 太危险，不匹配
+    const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp('^' + parts.map(esc).join('.+') + '$').test(full);
+  }
+
+  /** 在会话列表按昵称唯一定位（认脱敏）：精确优先；否则脱敏匹配且必须唯一，防发错人 */
+  function uniqueNickMatch(list, nick) {
+    const arr = Array.isArray(list) ? list : [];
+    const key = normNick(nick);
+    const exact = arr.filter(c => c && normNick(c.name) === key);
+    if (exact.length) return exact.length === 1 ? exact[0] : null;
+    const fuzzy = arr.filter(c => c && nickMatch(c.name, nick));
+    return fuzzy.length === 1 ? fuzzy[0] : null;
   }
 
   // ---------- 聊天窗口 ----------
@@ -978,17 +1025,18 @@
   async function openConversationByNick(nick) {
     if (!nick) return null;
     const S = state.S;
-    let conv = scanConvList().find(c => c.name === nick);
+    let conv = uniqueNickMatch(scanConvList(), nick);
     if (!conv) {
-      // 昵称可能没在当前虚拟列表可视区，用搜索框过滤
+      // 昵称可能没在当前虚拟列表可视区，用搜索框过滤。
+      // 但脱敏昵称（含 *）没法当搜索词，搜也搜不到 → 跳过搜索，交人工。
       const search = convSearchBox();
-      if (search) {
+      if (search && !isMaskedNick(nick)) {
         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
         setter.call(search, nick);
         search.dispatchEvent(new Event('input', { bubbles: true }));
         await sleep(1200);
-        // 只认精确匹配，绝不退化取第一个
-        conv = scanConvList().find(c => c.name === nick) || null;
+        // 精确优先；脱敏仅在唯一命中时采用，绝不退化取第一个（防发错人）
+        conv = uniqueNickMatch(scanConvList(), nick);
       }
     }
     if (!conv) { await clearConvSearch(); return null; }  // 失败：清搜索恢复列表
@@ -1640,7 +1688,7 @@
    */
   function pickDeliverableOrders(orders, nick, deliveredMap) {
     const all = Array.isArray(orders) ? orders : [];
-    const forBuyer = all.filter(o => o && o.buyerNick === nick);
+    const forBuyer = all.filter(o => o && nickMatch(o.buyerNick, nick)); // 认脱敏
     const pending = forBuyer.filter(o => o.orderStatus === '待发货' && !o.inRefund);
     const todo = pending.filter(o => !(deliveredMap && deliveredMap[o.orderId]));
     return { forBuyer, pending, todo };
@@ -1715,6 +1763,11 @@
       state.deliverBusy = true;
       if (btn) btn.textContent = '⏳ 正在发货…';
       try {
+      // 脱敏买家：昵称是模糊匹配上的，发货前强制人工核对一次，防发错人
+      if (todo.some(o => isMaskedNick(o.buyerNick)) && !confirm(
+          `⚠️ 该买家昵称被闲鱼脱敏（订单显示「${todo[0].buyerNick}」，聊天里是「${nick}」）。\n` +
+          `将发货：${todo.map(o => o.title + (o.spec ? '/' + o.spec : '')).join('、')}\n` +
+          `确认就是当前会话这个买家，点「确定」发货。`)) return;
       if (todo.length > 1 &&
           !confirm(`买家「${nick}」有 ${todo.length} 个待发货订单，确认全部发货？`)) return;
 
@@ -1782,7 +1835,12 @@
     // 聊天页两个按钮随你切换会话实时刷新（都独立于助手开关）：
     //   · 免打扰按钮：反映当前会话是否已停用机器人
     //   · 手动发货按钮：给当前会话买家发货（点击时才做权威订单核对+去重）
-    setInterval(() => { updateMuteButton(); updateDeliverButton(); updateTgButton(); updateAutoDeliverButton(); }, 1000);
+    const uiTimer = setInterval(() => {
+      // 本页脚本一旦成僵尸（插件被重载）就停掉，否则它会用旧状态继续改按钮，
+      // 和刷新后的新脚本抢同一个按钮 → 开关来回闪。
+      if (!extAlive()) { clearInterval(uiTimer); markZombie(); return; }
+      updateMuteButton(); updateDeliverButton(); updateTgButton(); updateAutoDeliverButton();
+    }, 1000);
     bindHumanReplyWatch(); // 监听你的手动发送，机器人据此让位
     bindActivityWatch();   // 监听你的鼠标/键盘，你在操作时机器人不抢屏切会话
     keepAlivePort();       // 常连接，降低后台被冻结的概率

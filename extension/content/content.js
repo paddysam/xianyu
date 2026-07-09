@@ -1763,11 +1763,9 @@
       state.deliverBusy = true;
       if (btn) btn.textContent = '⏳ 正在发货…';
       try {
-      // 脱敏买家：昵称是模糊匹配上的，发货前强制人工核对一次，防发错人
-      if (todo.some(o => isMaskedNick(o.buyerNick)) && !confirm(
-          `⚠️ 该买家昵称被闲鱼脱敏（订单显示「${todo[0].buyerNick}」，聊天里是「${nick}」）。\n` +
-          `将发货：${todo.map(o => o.title + (o.spec ? '/' + o.spec : '')).join('、')}\n` +
-          `确认就是当前会话这个买家，点「确定」发货。`)) return;
+      // 手动点「发货」本身就是你的确认；脱敏买家不再弹框打扰。
+      // 真正的安全网仍在：你已打开该买家会话、pickDeliverableOrders 认脱敏但
+      // 多单会走下面的确认、deliverOrder 再按 orderId 幂等去重。
       if (todo.length > 1 &&
           !confirm(`买家「${nick}」有 ${todo.length} 个待发货订单，确认全部发货？`)) return;
 

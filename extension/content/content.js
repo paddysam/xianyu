@@ -764,7 +764,17 @@
         continue;
       }
       const order = byId[oid];
-      if (!order || order.orderStatus !== '待发货' || order.inRefund) {
+      if (!order) {
+        // 本账号查无此单 ≠ 失败：两个号共用后端时，这可能是另一个号的单，
+        // 留 pending 让对方插件执行。排队超 10 分钟仍没人发成，才判失败通知飞机。
+        // （老版服务器不返回 age_sec → 按超时处理，即回到旧的立即判失败行为）
+        const age = Number(c.age_sec);
+        if (Number.isFinite(age) && age < 600) continue;
+        delete state.remoteCmdTries[oid];
+        await backend.resolveDeliverCommand(oid, 'failed', '待发货列表里找不到这单（已发/退款/超时？），请上工作台核对').catch(() => {});
+        continue;
+      }
+      if (order.orderStatus !== '待发货' || order.inRefund) {
         delete state.remoteCmdTries[oid];
         await backend.resolveDeliverCommand(oid, 'failed', '订单已不在待发货（已发/退款/超时？）').catch(() => {});
         continue;
@@ -774,7 +784,8 @@
       // 拿它当条件等于永远不执行（之前的 bug：远程指令只会被标记、从不真发货）
       if (state.deliverBusy) return;                 // 发货通道被占（如手动发货中）→ 下轮继续
       state.deliverBusy = true;
-      try { await deliverOrder(order); }
+      // force=true：远程指令是你的明确命令，商品即使关了自动发货也要发
+      try { await deliverOrder(order, true); }
       finally { state.deliverBusy = false; }
 
       if (state.deliveredOrders[oid]) {
@@ -866,19 +877,19 @@
    * 发一个订单（自动轮询与手动按钮共用同一条路径，确保去重/校验完全一致）。
    * 调用前应已确认：状态待发货、未退款、未在 deliveredOrders 里。
    */
-  async function deliverOrder(order) {
+  async function deliverOrder(order, force = false) {
     const skuLabel = order.title + (order.spec ? ' / ' + order.spec : '') +
       (order.price ? ' ¥' + order.price : '');
     const doneMark = state.settings.deliveryDoneMark || '【自动发货】';
     if (backend.enabled()) {
-      await deliverViaBackend(order, skuLabel, doneMark);
+      await deliverViaBackend(order, skuLabel, doneMark, force);
     } else {
       await deliverLocal(order, skuLabel, doneMark);
     }
   }
 
   /** 后端（MySQL）模式：取卡+扣库存+去重在数据库事务里完成，最安全 */
-  async function deliverViaBackend(order, skuLabel, doneMark) {
+  async function deliverViaBackend(order, skuLabel, doneMark, force = false) {
     // 先定位会话；找不到就不占用库存（瞬时失败下轮重试，连续失败才告警）
     const conv = await openConversationByNick(order.buyerNick);
     if (!conv) { noteConvLocateFail(order); return; }
@@ -899,7 +910,8 @@
         r = await backend.deliver({
           orderId: order.orderId, title: order.title, spec: order.spec,
           price: order.price, buyer: order.buyerNick,
-          template: state.settings.deliveryTemplate || ''
+          template: state.settings.deliveryTemplate || '',
+          force   // TG「发货」按钮/人工指令 = 明确要发，绕过该商品的自动发货开关
         });
       } catch (e) {
         log('error', `订单 ${order.orderId} 调后端发货失败（下轮重试）: ${e.message}`);
@@ -932,6 +944,20 @@
         case 'alreadyDelivered':
           await rememberDelivered(order);
           break;
+        case 'autoOff':
+          // 该商品关了自动发货：不发不扣，只留一条日志（新订单的 TG 提醒
+          // 由 tgNotifyNewOrders 负责推送，带「发货」按钮可远程触发）
+          if (!state.autoOffLogged) state.autoOffLogged = {};
+          if (!state.autoOffLogged[order.orderId]) {
+            state.autoOffLogged[order.orderId] = 1;
+            log('info', `订单 ${order.orderId}「${skuLabel}」该商品自动发货已关闭，等待 TG 按钮或人工发货`);
+          }
+          break;
+        case 'purchasing':
+          // 后端正在向卡网自动进货（卡网可能还要向它的上游买），几秒到一分钟；
+          // 本函数对未发货订单每轮都会重试，货到自动发出，这里只记日志不打扰
+          log('info', `订单 ${order.orderId}「${skuLabel}」本地无货，正在从卡网自动进货，到货后自动发出`);
+          break;
         case 'outOfStock':
           log('warn', `订单 ${order.orderId}「${skuLabel}」待发货，但数据库无可用库存，等待人工发货`);
           notify('⚠️ 有单待发货但缺货', `「${skuLabel}」库存不足，买家 ${order.buyerNick} 已付款，请补货或手动发货`);
@@ -940,7 +966,11 @@
           log('warn', `订单 ${order.orderId}「${skuLabel}」待发货，但没有匹配该规格/价格的规则，请人工发货`);
           notify('⚠️ 有单需人工发货', `「${skuLabel}」未配置对应规格的发货规则，请手动发货`);
           break;
-        case 'noRule': break;                                    // 没配规则的商品：不管
+        case 'noRule':
+          // 不弹通知（没配规则的商品可能是故意不管的），但必须留日志——
+          // 手动点发货失败时全靠运行日志定位原因，静默会让人完全没法排查
+          log('warn', `订单 ${order.orderId}「${skuLabel}」没有标题能匹配的发货规则（检查规则的"商品标题匹配"是否包含在宝贝标题里）`);
+          break;
         case 'noContent':
           log('warn', `订单 ${order.orderId}「${skuLabel}」规则未填发货内容，跳过`);
           break;
@@ -1771,7 +1801,7 @@
 
         let ok = 0, fail = 0;
         for (const order of todo) {
-          await deliverOrder(order);                     // 与自动发货同一条安全路径
+          await deliverOrder(order, true);               // 与自动发货同一条安全路径；手动点击=明确指令，绕过商品的自动发货开关
           if (state.deliveredOrders[order.orderId]) ok++; else fail++;
           await sleep(rand(600, 1200));
         }

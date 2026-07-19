@@ -35,6 +35,15 @@
   .step p{color:#6b7280;font-size:15px}
   /* safe */
   .safe{max-width:760px;margin:0 auto;background:#fffbe6;border:1px solid #ffe600;border-radius:14px;padding:22px 26px;font-size:16px;color:#4a4300;text-align:center}
+  /* AI Key 引导 */
+  .aibox{max-width:820px;margin:0 auto;background:#1e2430;color:#fff;border-radius:18px;padding:34px 36px}
+  .aibox h2{color:#fff;text-align:left;margin-bottom:6px}
+  .aibox .s2{color:#c7cdd6;font-size:16px;margin-bottom:22px}
+  .aisteps{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:24px}
+  .astep{flex:1;min-width:150px;background:#2a3140;border-radius:12px;padding:16px 18px;font-size:15px}
+  .astep b{color:#ffe600;display:block;margin-bottom:4px}
+  .aibtn{display:inline-block;background:#ffe600;color:#1a1a1a;font-weight:800;font-size:17px;padding:14px 30px;border-radius:12px;text-decoration:none}
+  .aibox .tip{color:#9aa3b2;font-size:13px;margin-top:14px}
   footer{border-top:1px solid #eef0f3;padding:30px 0;color:#9aa3b2;font-size:14px;text-align:center}
   footer a{color:#6b7280}
   @media(max-width:760px){.grid{grid-template-columns:1fr}h1{font-size:34px}}
@@ -61,6 +70,20 @@
       <div class="card"><div class="ic">📋</div><h3>库存总览</h3><p>每个规格放了多少、卖了多少、还剩多少一目了然，库存不足自动标红提醒补货。</p></div>
       <div class="card"><div class="ic">📣</div><h3>Telegram 提醒（可选）</h3><p>有人下单、发货成功、缺货需人工，实时推到你自己的 Telegram，离开电脑也不错过。</p></div>
       <div class="card"><div class="ic">🛡️</div><h3>拟人 · 防打扰</h3><p>随机延迟模拟人工、每会话限频；你在操作时机器人自动让位，不抢你正在打字的窗口。</p></div>
+    </div>
+  </div></section>
+
+  <section><div class="wrap">
+    <div class="aibox">
+      <h2>没有 AI 密钥？一分钟获取</h2>
+      <div class="s2">想用「AI 智能客服」但没有 OpenAI 密钥？到合作的 AI 接口站注册，拿到接口地址和密钥，填进插件即可。</div>
+      <div class="aisteps">
+        <div class="astep"><b>① 注册</b>打开下方网站，注册一个账号</div>
+        <div class="astep"><b>② 建令牌</b>在「令牌 / API 令牌」页新建一个，复制密钥（sk- 开头）</div>
+        <div class="astep"><b>③ 填进插件</b>把接口地址和密钥填到插件设置页「AI 接口」，保存即可</div>
+      </div>
+      <a class="aibtn" href="https://api.mytokens.vip/home" target="_blank" rel="noopener">前往获取 AI 密钥 →</a>
+      <div class="tip">该站为第三方 AI 接口服务，注册与充值在其站内完成，与本插件无从属关系。插件默认也可填 OpenAI 官方或任意 OpenAI 兼容接口。</div>
     </div>
   </div></section>
 

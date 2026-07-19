@@ -13,6 +13,7 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 const pool = require('./db');
+const shop = require('./shop-client');   // 卡网自动进货（.env 配齐 SHOP_* 才启用）
 
 const path = require('path');
 const app = express();
@@ -59,16 +60,30 @@ app.get('/api/products', wrap(async (req, res) => {
   res.json({ ok: true, products: rows });
 }));
 
+// 货源字段清洗：source 只认 local/shop；shop 模式必须给卡网 SKU ID
+function normalizeSourceFields(b) {
+  const source = b.source === 'shop' ? 'shop' : 'local';
+  const shopSkuId = Number(b.shop_sku_id) > 0 ? Number(b.shop_sku_id) : null;
+  const maxCost = Number(b.max_cost) > 0 ? Number(b.max_cost) : null;
+  if (source === 'shop' && !shopSkuId) {
+    return { error: '卡网自动进货需要填写卡网 SKU ID' };
+  }
+  return { source, shopSkuId, maxCost };
+}
+
 app.post('/api/products', wrap(async (req, res) => {
   const b = req.body || {};
   // 空标题的规则永远匹配不到订单，只会变成"(未命名)"垃圾行，拒收
   if (!b.match || !String(b.match).trim()) {
     return res.status(400).json({ ok: false, error: '商品标题匹配不能为空' });
   }
+  const sf = normalizeSourceFields(b);
+  if (sf.error) return res.status(400).json({ ok: false, error: sf.error });
   const [r] = await pool.query(
-    `INSERT INTO products (match_title, spec, price, mode, delivery, note)
-     VALUES (?,?,?,?,?,?)`,
-    [b.match || '', b.spec || '', b.price || '', b.mode || 'pool', b.delivery || '', b.note || '']);
+    `INSERT INTO products (match_title, spec, price, mode, delivery, note, source, shop_sku_id, max_cost, auto_deliver)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    [b.match || '', b.spec || '', b.price || '', b.mode || 'pool', b.delivery || '', b.note || '',
+     sf.source, sf.shopSkuId, sf.maxCost, Number(b.auto_deliver) === 1 ? 1 : 0]);   // 默认关：新品必须显式开启才会自动发
   res.json({ ok: true, id: r.insertId });
 }));
 
@@ -77,9 +92,13 @@ app.put('/api/products/:id', wrap(async (req, res) => {
   if (!b.match || !String(b.match).trim()) {
     return res.status(400).json({ ok: false, error: '商品标题匹配不能为空' });
   }
+  const sf = normalizeSourceFields(b);
+  if (sf.error) return res.status(400).json({ ok: false, error: sf.error });
   await pool.query(
-    `UPDATE products SET match_title=?, spec=?, price=?, mode=?, delivery=?, note=? WHERE id=?`,
-    [b.match || '', b.spec || '', b.price || '', b.mode || 'pool', b.delivery || '', b.note || '', req.params.id]);
+    `UPDATE products SET match_title=?, spec=?, price=?, mode=?, delivery=?, note=?,
+       source=?, shop_sku_id=?, max_cost=?, auto_deliver=? WHERE id=?`,
+    [b.match || '', b.spec || '', b.price || '', b.mode || 'pool', b.delivery || '', b.note || '',
+     sf.source, sf.shopSkuId, sf.maxCost, Number(b.auto_deliver) === 1 ? 1 : 0, req.params.id]);
   res.json({ ok: true });
 }));
 
@@ -151,10 +170,12 @@ app.post('/api/products/:id/cards/:cardId/manual', wrap(async (req, res) => {
  *   4. 写 deliveries（order_id 唯一约束兜底防并发重发）
  * 返回 { ok, status, content, stockLeft }
  */
-app.post('/api/deliver', wrap(async (req, res) => {
-  const { orderId, title = '', spec = '', price = '', buyer = '', template = '' } = req.body || {};
-  if (!orderId) return res.status(400).json({ ok: false, error: 'orderId required' });
-
+/**
+ * 单次发货尝试（一个数据库事务）：去重 → 匹配规则 → 锁卡扣减 → 记录。
+ * 返回 { status, ... , rule }；rule 只在 outOfStock 时给外层判断是否走卡网进货。
+ * 注意：本函数内绝不做任何 HTTP 调用——事务里发 HTTP 会长时间持有行锁。
+ */
+async function tryDeliverOnce({ orderId, title, spec, price, buyer, template, force }) {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
@@ -163,21 +184,28 @@ app.post('/api/deliver', wrap(async (req, res) => {
     const [dup] = await conn.query('SELECT id FROM deliveries WHERE order_id=? FOR UPDATE', [orderId]);
     if (dup.length) {
       await conn.commit();
-      return res.json({ ok: true, status: 'alreadyDelivered' });
+      return { ok: true, status: 'alreadyDelivered' };
     }
 
     // 2. 匹配规则
     const [prods] = await conn.query('SELECT * FROM products');
     const titleHits = prods.filter(p => p.match_title && title.includes(p.match_title));
-    if (!titleHits.length) { await conn.commit(); return res.json({ ok: true, status: 'noRule' }); }
+    if (!titleHits.length) { await conn.commit(); return { ok: true, status: 'noRule' }; }
     const hits = titleHits.filter(p =>
       (!p.spec || p.spec === spec) && (!p.price || String(p.price) === String(price)));
-    if (!hits.length) { await conn.commit(); return res.json({ ok: true, status: 'needManual' }); }
+    if (!hits.length) { await conn.commit(); return { ok: true, status: 'needManual' }; }
     // 优先最具体的规则（规格+价格都填 > 只填一个 > 全不限），
     // 避免"不限规格"兜底规则抢走本该走精确规格库存的订单
     hits.sort((a, b) =>
       ((b.spec ? 1 : 0) + (b.price ? 1 : 0)) - ((a.spec ? 1 : 0) + (a.price ? 1 : 0)));
     const rule = hits[0];
+
+    // 2.5 自动发货开关：关了就只提醒不发（不扣卡不进货）。
+    // force=true 是你在 TG 点「发货」按钮或人工触发的明确指令，放行。
+    if (!force && Number(rule.auto_deliver) === 0) {
+      await conn.commit();
+      return { ok: true, status: 'autoOff' };
+    }
 
     // 3. 组装内容 + 扣卡
     let card = null, content, stockLeft = null;
@@ -185,7 +213,7 @@ app.post('/api/deliver', wrap(async (req, res) => {
       const [cardRows] = await conn.query(
         `SELECT id, secret FROM cards WHERE product_id=? AND status='available'
          ORDER BY id LIMIT 1 FOR UPDATE`, [rule.id]);
-      if (!cardRows.length) { await conn.commit(); return res.json({ ok: true, status: 'outOfStock' }); }
+      if (!cardRows.length) { await conn.commit(); return { ok: true, status: 'outOfStock', rule }; }
       card = cardRows[0];
       await conn.query(
         `UPDATE cards SET status='used', used_order_id=?, used_at=NOW() WHERE id=?`,
@@ -199,7 +227,7 @@ app.post('/api/deliver', wrap(async (req, res) => {
       stockLeft = cnt.remaining;
     } else {
       content = rule.delivery || '';
-      if (!content) { await conn.commit(); return res.json({ ok: true, status: 'noContent' }); }
+      if (!content) { await conn.commit(); return { ok: true, status: 'noContent' }; }
     }
 
     // 4. 记录发货
@@ -209,16 +237,240 @@ app.post('/api/deliver', wrap(async (req, res) => {
       [orderId, rule.id, card ? card.id : null, title, spec, price, buyer, content]);
 
     await conn.commit();
-    res.json({ ok: true, status: 'delivered', content, card: card ? card.secret : null, stockLeft });
+    return { ok: true, status: 'delivered', content, card: card ? card.secret : null, stockLeft };
   } catch (e) {
     await conn.rollback();
     // 唯一约束冲突（并发重发）→ 视为已发
-    if (e.code === 'ER_DUP_ENTRY') return res.json({ ok: true, status: 'alreadyDelivered' });
+    if (e.code === 'ER_DUP_ENTRY') return { ok: true, status: 'alreadyDelivered' };
     throw e;
   } finally {
     conn.release();
   }
+}
+
+app.post('/api/deliver', wrap(async (req, res) => {
+  const { orderId, title = '', spec = '', price = '', buyer = '', template = '', force = false } = req.body || {};
+  if (!orderId) return res.status(400).json({ ok: false, error: 'orderId required' });
+
+  const args = { orderId, title, spec, price, buyer, template, force: !!force };
+  let r = await tryDeliverOnce(args);
+
+  // 本地无货且规则配了"卡网自动进货"→ 现场向卡网下单取货，取回入池后再发一次
+  if (r.status === 'outOfStock' && r.rule &&
+      r.rule.source === 'shop' && r.rule.shop_sku_id && shop.enabled()) {
+    const p = await ensureShopPurchase(orderId, r.rule);
+    if (p.imported) {
+      r = await tryDeliverOnce(args);       // 卡已入池，正常发货流程再走一遍
+    } else if (p.pending) {
+      // 卡网正在向它的上游采购，几秒到一分钟；插件对未发货订单每轮都会重试，
+      // 后台轮询器取到货入池后，下一轮自动发出
+      return res.json({ ok: true, status: 'purchasing' });
+    } else {
+      return res.json({ ok: true, status: 'outOfStock', reason: p.error || 'shop purchase failed' });
+    }
+  }
+
+  const { rule, ...resp } = r;   // rule 是内部信息，不回给插件
+  res.json(resp);
 }));
+
+// ---------- 卡网自动进货 ----------
+/**
+ * 进货状态机（shop_purchases，闲鱼订单号唯一）：
+ *   ordering → 已决定进货，正在/即将向卡网下单（downstream_no 已先落库，
+ *              崩溃重启后用同一个号重放，卡网幂等不会重复扣款）
+ *   ordered  → 卡网订单已建已扣款，等交付（卡网本地有货=秒到；要向上游买=几秒到一分钟）
+ *   imported → 卡密已取回并放进本地 cards 池（后续走原有发货流程）
+ *   failed   → 进货失败（余额不足/超价/商品下架等），冷却期后可自动重试
+ */
+const SHOP_WAIT_MS = Number(process.env.SHOP_DELIVER_WAIT_MS || 15000);  // 发货请求内最多等这么久
+const SHOP_RETRY_COOLDOWN_MS = 10 * 60 * 1000;                           // failed 后冷却 10 分钟再试
+
+/** 只发给店主的 TG 通知（未配置则静默） */
+function notifyOwner(text) {
+  try { if (TG_TOKEN && TG_CHAT) tgReply(text); } catch (_) { /* 通知失败不影响主流程 */ }
+}
+
+/** 把取回的卡密放进本地库存池。原子状态转移保证同一笔进货绝不入池两次。 */
+async function importPurchaseToPool(purchase, payload) {
+  const secret = String(payload || '').trim();
+  if (!secret) return false;
+  const [r] = await pool.query(
+    `UPDATE shop_purchases SET status='imported' WHERE id=? AND status IN ('ordering','ordered')`,
+    [purchase.id]);
+  if (!r.affectedRows) return true;   // 别的调用方（轮询器/并发请求）已入池
+  await pool.query('INSERT INTO cards (product_id, secret) VALUES (?,?)', [purchase.product_id, secret]);
+  console.log(`[shop] 进货入池：闲鱼单 ${purchase.order_id} ← 卡网单 ${purchase.shop_order_no || purchase.shop_order_id}`);
+  return true;
+}
+
+async function markPurchaseFailed(purchase, error) {
+  await pool.query(
+    `UPDATE shop_purchases SET status='failed', error=? WHERE id=? AND status IN ('ordering','ordered')`,
+    [String(error).slice(0, 250), purchase.id]);
+}
+
+/**
+ * 推进一笔进货直到入池 / 超时 / 失败。
+ * 返回 { imported } | { pending } | { error }
+ */
+async function ensureShopPurchase(orderId, rule) {
+  try {
+    // 1. 取或建进货记录（order_id 唯一：并发请求只会有一条）
+    let [[p]] = await pool.query('SELECT * FROM shop_purchases WHERE order_id=?', [orderId]);
+    if (!p) {
+      // 下单前核价：卡网价超过成本上限就不买（防上游涨价后每单倒贴）。
+      // 核价失败不阻断——下单后还有 amount 兜底核对。
+      if (rule.max_cost != null) {
+        try {
+          const snap = await findShopSku(Number(rule.shop_sku_id));
+          if (snap && snap.price && snap.price > Number(rule.max_cost)) {
+            const msg = `卡网价 ¥${snap.price} 已超过成本上限 ¥${rule.max_cost}`;
+            notifyOwner(`⛔ 未自动进货：${rule.match_title} —— ${msg}\n闲鱼订单 ${orderId} 需人工处理`);
+            return { error: msg };
+          }
+        } catch (e) { console.warn('[shop] 核价失败（继续下单，靠事后核对）:', e.message); }
+      }
+      // downstream_no 先落库再下单：崩溃后用同一个号重放，卡网幂等保证不重复扣款
+      try {
+        await pool.query(
+          `INSERT INTO shop_purchases (order_id, product_id, shop_sku_id, downstream_no, attempt, status)
+           VALUES (?,?,?,?,1,'ordering')`,
+          [orderId, rule.id, rule.shop_sku_id, `XY-${orderId}-1`]);
+      } catch (e) {
+        if (e.code !== 'ER_DUP_ENTRY') throw e;   // 并发建了同一条 → 直接用现有的
+      }
+      [[p]] = await pool.query('SELECT * FROM shop_purchases WHERE order_id=?', [orderId]);
+    }
+
+    if (p.status === 'imported') return { imported: true };
+    if (p.status === 'failed') {
+      // 冷却期内不重试（避免每轮 tick 反复打卡网）；过了冷却换一个幂等号重来
+      const age = Date.now() - new Date(p.updated_at).getTime();
+      if (age < SHOP_RETRY_COOLDOWN_MS) return { error: p.error || 'purchase failed' };
+      const attempt = (p.attempt || 1) + 1;
+      await pool.query(
+        `UPDATE shop_purchases SET status='ordering', attempt=?, downstream_no=?, shop_order_id=NULL, shop_order_no=NULL, error='' WHERE id=?`,
+        [attempt, `XY-${orderId}-${attempt}`, p.id]);
+      [[p]] = await pool.query('SELECT * FROM shop_purchases WHERE id=?', [p.id]);
+    }
+
+    const deadline = Date.now() + SHOP_WAIT_MS;
+
+    // 2. 还没有卡网订单 → 下单（钱包扣款）
+    if (!p.shop_order_id) {
+      const r = await shop.createOrder({
+        skuId: p.shop_sku_id, quantity: 1, downstreamOrderNo: p.downstream_no, traceId: p.downstream_no
+      });
+      if (!r || !r.ok) {
+        const code = (r && r.error_code) || 'unknown';
+        const msg = (r && r.error_message) || '卡网下单失败';
+        await markPurchaseFailed(p, `${code}: ${msg}`);
+        notifyOwner(code === 'payment_failed'
+          ? `⛔ 卡网进货失败：钱包余额不足！\n商品：${rule.match_title}\n闲鱼订单 ${orderId} 待发货，请去卡网充值（充值后 10 分钟内自动重试）`
+          : `⛔ 卡网进货失败：${msg}\n商品：${rule.match_title}，闲鱼订单 ${orderId}`);
+        return { error: `${code}: ${msg}` };
+      }
+      await pool.query(
+        `UPDATE shop_purchases SET status='ordered', shop_order_id=?, shop_order_no=?, amount=? WHERE id=?`,
+        [r.order_id, r.order_no || '', r.amount || '', p.id]);
+      p.shop_order_id = r.order_id; p.shop_order_no = r.order_no; p.amount = r.amount;
+      // 事后核对实付：超上限也照取货（钱已扣），但要告警
+      if (rule.max_cost != null && Number(r.amount) > Number(rule.max_cost)) {
+        notifyOwner(`⚠️ 本单进货价 ¥${r.amount} 超过成本上限 ¥${rule.max_cost}（${rule.match_title}），货照发，请核查卡网价格`);
+      }
+    }
+
+    // 3. 轮询取货直到拿到卡密或本次等待窗口用完
+    for (;;) {
+      const o = await shop.getOrder(p.shop_order_id);
+      if (o && o.ok && o.fulfillment && o.fulfillment.payload) {
+        await importPurchaseToPool(p, o.fulfillment.payload);
+        return { imported: true };
+      }
+      // 卡网侧订单被取消/退款 → 失败（钱会退回钱包，不用担心）
+      if (o && o.ok && ['canceled', 'refunded'].includes(String(o.status))) {
+        await markPurchaseFailed(p, `卡网订单 ${o.status}`);
+        notifyOwner(`⛔ 卡网进货订单被${o.status === 'canceled' ? '取消' : '退款'}：${rule.match_title}，闲鱼订单 ${orderId} 需人工处理`);
+        return { error: `shop order ${o.status}` };
+      }
+      if (Date.now() + 2500 > deadline) return { pending: true };   // 交给后台轮询器继续
+      await new Promise(r2 => setTimeout(r2, 2500));
+    }
+  } catch (e) {
+    console.error('[shop] 进货异常:', e.message);
+    return { error: e.message };   // 网络类异常不落 failed：下一轮重进这个函数会自动续跑
+  }
+}
+
+// SKU 快照缓存：skuId -> { price, isActive, title, ts }。核价用，10 分钟有效
+const shopSkuCache = new Map();
+async function findShopSku(skuId) {
+  const hit = shopSkuCache.get(skuId);
+  if (hit && Date.now() - hit.ts < 10 * 60 * 1000) return hit;
+  for (let page = 1; page <= 10; page++) {
+    const r = await shop.listProducts(page, 50);
+    if (!r || !r.ok || !Array.isArray(r.items)) break;
+    for (const prod of r.items) {
+      for (const sku of (prod.skus || [])) {
+        if (Number(sku.id) === Number(skuId)) {
+          const snap = {
+            price: Number(sku.price_amount),
+            isActive: !!sku.is_active && !!prod.is_active,
+            title: (prod.title && (prod.title['zh-CN'] || Object.values(prod.title)[0])) || '',
+            ts: Date.now()
+          };
+          shopSkuCache.set(Number(skuId), snap);
+          return snap;
+        }
+      }
+    }
+    if (r.items.length < 50) break;   // 已到最后一页
+  }
+  return null;
+}
+
+// ---------- 后台轮询器：接手发货请求没等到的进货单 ----------
+async function shopPurchasePoller() {
+  try {
+    const [rows] = await pool.query(
+      `SELECT sp.*, p.match_title FROM shop_purchases sp
+       LEFT JOIN products p ON p.id = sp.product_id
+       WHERE sp.status IN ('ordering','ordered') LIMIT 20`);
+    for (const p of rows) {
+      try {
+        if (!p.shop_order_id) {
+          // ordering 且没有卡网单号：可能是崩溃残留 → 用原幂等号重放下单（不会重复扣款）
+          if (Date.now() - new Date(p.updated_at).getTime() < 60 * 1000) continue; // 给在途请求让路
+          const r = await shop.createOrder({
+            skuId: p.shop_sku_id, quantity: 1, downstreamOrderNo: p.downstream_no, traceId: p.downstream_no
+          });
+          if (!r || !r.ok) {
+            await markPurchaseFailed(p, `${(r && r.error_code) || 'unknown'}: ${(r && r.error_message) || 'createOrder failed'}`);
+            continue;
+          }
+          await pool.query(
+            `UPDATE shop_purchases SET status='ordered', shop_order_id=?, shop_order_no=?, amount=? WHERE id=?`,
+            [r.order_id, r.order_no || '', r.amount || '', p.id]);
+          p.shop_order_id = r.order_id;
+        }
+        const o = await shop.getOrder(p.shop_order_id);
+        if (o && o.ok && o.fulfillment && o.fulfillment.payload) {
+          if (await importPurchaseToPool(p, o.fulfillment.payload)) {
+            notifyOwner(`📦 卡网进货到货：${p.match_title || ('#' + p.product_id)}\n闲鱼订单 ${p.order_id} 将在插件下一轮自动发货`);
+          }
+        } else if (o && o.ok && ['canceled', 'refunded'].includes(String(o.status))) {
+          await markPurchaseFailed(p, `卡网订单 ${o.status}`);
+          notifyOwner(`⛔ 卡网进货订单被${o.status === 'canceled' ? '取消' : '退款'}：闲鱼订单 ${p.order_id} 需人工处理`);
+        }
+      } catch (e) {
+        console.warn('[shop] 轮询进货单失败:', p.order_id, e.message);
+      }
+    }
+  } catch (e) {
+    console.warn('[shop] 轮询器异常:', e.message);
+  }
+}
 
 // 回滚一次发货：聊天消息发送失败时调用，恢复卡密、删除发货记录
 app.post('/api/deliver/rollback', wrap(async (req, res) => {
@@ -320,10 +572,13 @@ app.delete('/api/style', wrap(async (req, res) => {
 
 // ---------- 远程发货指令队列（飞机点「发货」→ 插件轮询执行）----------
 
-// 插件取待执行指令
+// 插件取待执行指令。age_sec=指令排队秒数：双账号共用后端时，
+// 插件靠它判断"本账号查无此单"该继续等（可能是另一账号的单）还是判失败
 app.get('/api/deliver-commands', wrap(async (req, res) => {
   const [rows] = await pool.query(
-    "SELECT order_id, buyer, title, spec, price FROM deliver_commands WHERE status='pending' ORDER BY id LIMIT 20");
+    `SELECT order_id, buyer, title, spec, price,
+       TIMESTAMPDIFF(SECOND, created_at, NOW()) AS age_sec
+     FROM deliver_commands WHERE status='pending' ORDER BY id LIMIT 20`);
   res.json({ ok: true, commands: rows });
 }));
 
@@ -467,8 +722,10 @@ async function tgHandleCallback(cb) {
     // 已发过的不再排（查发货记录）
     const [[done]] = await pool.query('SELECT id FROM deliveries WHERE order_id=?', [orderId]);
     if (done) return tgReply(`这单（尾号 …${orderId.slice(-4)}）已经发过货了，未重复发。`);
+    // 重排同一单时把 created_at 一起重置：age_sec 从 0 重新计，
+    // 给持有该订单的账号留足执行窗口（另一账号靠 age_sec 决定等多久才判失败）
     await pool.query(
-      "INSERT INTO deliver_commands (order_id) VALUES (?) ON DUPLICATE KEY UPDATE status='pending', result=''",
+      "INSERT INTO deliver_commands (order_id) VALUES (?) ON DUPLICATE KEY UPDATE status='pending', result='', created_at=NOW()",
       [orderId]);
     return tgReply(`✅ 已排单，电脑上的插件将尽快发货（订单尾号 …${orderId.slice(-4)}）。\n发完会回你结果。`);
   }
@@ -542,6 +799,36 @@ async function tgPollLoop() {
   }
 }
 
+// 启动时自愈"卡网自动进货"所需的表结构（老库无需手动跑 SQL）
+async function ensureShopSourceSchema() {
+  const addColumn = async (sql) => {
+    try { await pool.query(sql); }
+    catch (e) { if (e.code !== 'ER_DUP_FIELDNAME') throw e; }   // 列已存在 → 幂等跳过
+  };
+  await addColumn(`ALTER TABLE products ADD COLUMN source VARCHAR(16) NOT NULL DEFAULT 'local' COMMENT '货源：local=本地库存 / shop=卡网自动进货'`);
+  await addColumn(`ALTER TABLE products ADD COLUMN shop_sku_id BIGINT NULL COMMENT '卡网 SKU ID（source=shop 时必填）'`);
+  await addColumn(`ALTER TABLE products ADD COLUMN max_cost DECIMAL(10,2) NULL COMMENT '单件成本上限（卡网价超过则不自动进货）'`);
+  await addColumn(`ALTER TABLE products ADD COLUMN auto_deliver TINYINT(1) NOT NULL DEFAULT 1 COMMENT '1=付款后自动发货 / 0=只提醒不自动发（TG 按钮或人工触发）'`);
+  // 默认改为关：新品必须显式开启（幂等，重复执行无副作用）
+  await pool.query(`ALTER TABLE products ALTER COLUMN auto_deliver SET DEFAULT 0`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS shop_purchases (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    order_id VARCHAR(64) NOT NULL UNIQUE COMMENT '闲鱼订单号（一单最多一笔进货）',
+    product_id BIGINT NOT NULL,
+    shop_sku_id BIGINT NOT NULL,
+    downstream_no VARCHAR(80) NOT NULL COMMENT '发给卡网的幂等单号（先落库再下单，崩溃重放不重复扣款）',
+    attempt INT NOT NULL DEFAULT 1,
+    shop_order_id BIGINT NULL,
+    shop_order_no VARCHAR(64) NULL,
+    amount VARCHAR(32) NULL COMMENT '实际扣款金额（对账用）',
+    status VARCHAR(16) NOT NULL DEFAULT 'ordering' COMMENT 'ordering/ordered/imported/failed',
+    error VARCHAR(255) NOT NULL DEFAULT '',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_status (status)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='卡网自动进货记录'`);
+}
+
 // 启动时自建"远程发货指令队列"表（新表，老库自愈，无需手动跑 SQL）
 async function ensureDeliverCommandsTable() {
   await pool.query(`CREATE TABLE IF NOT EXISTS deliver_commands (
@@ -566,8 +853,18 @@ app.listen(PORT, BIND, async () => {
   console.log(`✓ 闲鱼助手后端已启动: http://${BIND}:${PORT}`);
   console.log(`  健康检查: /api/health`);
   try { await ensureDeliverCommandsTable(); } catch (e) { console.error('建表 deliver_commands 失败:', e.message); }
+  try { await ensureShopSourceSchema(); } catch (e) { console.error('卡网进货表结构自愈失败:', e.message); }
   if (BIND !== '127.0.0.1' && !AUTH_TOKEN) {
     console.log('  ⚠️ 已对外监听但未设置 AUTH_TOKEN，强烈建议在 .env 设置访问令牌！');
+  }
+  if (shop.enabled()) {
+    setInterval(shopPurchasePoller, 20 * 1000);   // 兜底轮询：发货请求没等到的进货单由它接手
+    try {
+      const pong = await shop.ping();
+      console.log(pong && pong.ok
+        ? `✓ 卡网自动进货已启用（余额 ${pong.balance || '?'} ${pong.currency || ''}）`
+        : `⚠️ 卡网连接异常：${(pong && pong.error_message) || '未知错误'}`);
+    } catch (e) { console.log('⚠️ 卡网连接失败:', e.message); }
   }
   if (TG_TOKEN && TG_CHAT) {
     tgPollLoop();

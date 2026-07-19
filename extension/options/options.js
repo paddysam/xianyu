@@ -93,8 +93,22 @@ function mapBackendProduct(r) {
   return {
     id: r.id, match: r.match_title || '', spec: r.spec || '', price: r.price || '',
     mode: r.mode || 'pool', delivery: r.delivery || '', note: r.note || '',
+    source: r.source || 'local', shopSkuId: r.shop_sku_id || '', maxCost: r.max_cost || '',
+    autoDeliver: Number(r.auto_deliver) === 0 ? 0 : 1,
     cards: [],                    // 后端模式卡密不内联，走库存页补货
     stock: Number(r.stock || 0), sold: Number(r.sold || 0)
+  };
+}
+
+/** 前端规则 → 后端 create/update 载荷（货源字段统一在这拼，避免两处保存漏字段） */
+function productPayload(p) {
+  return {
+    match: p.match, spec: p.spec, price: p.price,
+    mode: p.mode, delivery: p.delivery, note: p.note,
+    source: p.source || 'local',
+    shop_sku_id: p.shopSkuId || null,
+    max_cost: p.maxCost || null,
+    auto_deliver: Number(p.autoDeliver) === 0 ? 0 : 1
   };
 }
 
@@ -183,6 +197,12 @@ function renderProds() {
           <option value="pool">卡密库存（每单发一条并扣库存，适合账号/兑换码）</option>
         </select>
       </label>
+      <label>自动发货
+        <select class="p-auto" data-i="${i}">
+          <option value="1">开（付款后机器人立即自动发货）</option>
+          <option value="0">关（只提醒不自动发；TG 上点「发货」或人工处理）</option>
+        </select>
+      </label>
       <label class="p-delivery-label">${isPool
         ? '发货话术模板（用 {卡密} 占位；留空则用「行为设置」里的全局模板）'
         : '发货内容（链接/说明，付款后原样发送）'}
@@ -192,6 +212,16 @@ function renderProds() {
       <div class="p-cards-hint">
         卡密库存：<b style="color:${stock <= 2 ? '#c00' : '#00a35c'}">${stock} 条</b>
         —— 卡密的查看和补货都在「库存总览」页
+      </div>
+      <label>货源
+        <select class="p-source" data-i="${i}">
+          <option value="local">本地库存（只发「库存总览」里的卡密，发完即缺货）</option>
+          <option value="shop">卡网自动进货（先发本地库存，发完自动到卡网下单取货再发）</option>
+        </select>
+      </label>
+      <div class="row p-shop-row" data-i="${i}" style="${(p.source || 'local') === 'shop' ? '' : 'display:none'}">
+        <label>卡网 SKU ID（商城后台商品映射页可查）<input class="p-shop-sku" data-i="${i}" placeholder="如 25"></label>
+        <label>单件成本上限（卡网价超过则不买、转人工；留空=不限）<input class="p-max-cost" data-i="${i}" placeholder="如 5.00"></label>
       </div>` : ''}
       <label>备注（仅自己看）<input class="p-note" data-i="${i}"></label>`;
     div.querySelector('.p-match').value = p.match || '';
@@ -200,6 +230,12 @@ function renderProds() {
     div.querySelector('.p-mode').value = p.mode || 'fixed';
     div.querySelector('.p-delivery').value = p.delivery || '';
     div.querySelector('.p-note').value = p.note || '';
+    div.querySelector('.p-auto').value = String(Number(p.autoDeliver) === 0 ? 0 : 1);
+    if (isPool) {
+      div.querySelector('.p-source').value = p.source || 'local';
+      div.querySelector('.p-shop-sku').value = p.shopSkuId || '';
+      div.querySelector('.p-max-cost').value = p.maxCost || '';
+    }
     box.appendChild(div);
   });
   box.querySelectorAll('.del').forEach(b => b.addEventListener('click', () => {
@@ -215,13 +251,24 @@ function renderProds() {
   bind('.p-price', 'price');
   bind('.p-delivery', 'delivery');
   bind('.p-note', 'note');
+  bind('.p-shop-sku', 'shopSkuId');
+  bind('.p-max-cost', 'maxCost');
   box.querySelectorAll('.p-mode').forEach(sel => sel.addEventListener('change', () => {
     products[Number(sel.dataset.i)].mode = sel.value;
     renderProds(); // 切换模式重绘，更新库存提示
   }));
+  box.querySelectorAll('.p-auto').forEach(sel => sel.addEventListener('change', () => {
+    products[Number(sel.dataset.i)].autoDeliver = Number(sel.value);
+  }));
+  box.querySelectorAll('.p-source').forEach(sel => sel.addEventListener('change', () => {
+    products[Number(sel.dataset.i)].source = sel.value;
+    // 只切换卡网字段行的显隐，不整体重绘（避免输入焦点丢失）
+    const row = box.querySelector(`.p-shop-row[data-i="${sel.dataset.i}"]`);
+    if (row) row.style.display = sel.value === 'shop' ? '' : 'none';
+  }));
 }
 $('addProd').addEventListener('click', () => {
-  products.push({ id: 'new_' + Date.now(), match: '', spec: '', price: '', mode: 'fixed', delivery: '', cards: [], note: '' });
+  products.push({ id: 'new_' + Date.now(), match: '', spec: '', price: '', mode: 'fixed', delivery: '', cards: [], note: '', source: 'local', shopSkuId: '', maxCost: '', autoDeliver: 0 });
   renderProds();
   renderStock();
 });
@@ -350,7 +397,7 @@ function renderSkuPicker(skus) {
       products.push({
         id: 'new_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
         match: s.title, spec: s.spec || '', price: s.price || '',
-        mode: 'pool', delivery: '', cards: [], note: ''
+        mode: 'pool', delivery: '', cards: [], note: '', source: 'local', shopSkuId: '', maxCost: '', autoDeliver: 0
       });
       renderProds();
       renderStock();
@@ -412,8 +459,13 @@ function renderStock() {
     const name = escapeHtml(p.match || '(未命名)');
     const spec = p.spec ? escapeHtml(p.spec) : '<span class="muted">不限</span>';
     const price = p.price ? '¥' + escapeHtml(p.price) : '<span class="muted">不限</span>';
+    // 卡网自动进货的商品：本地 0 不等于缺货（无货时会到卡网现买现发），
+    // 库存数旁边挂个标识，避免看到红 0 误以为要人工补货
+    const shopTag = (isPool && (p.source || 'local') === 'shop')
+      ? ' <span style="font-size:11px;color:#0a7f4f;background:#e6f7ef;border-radius:4px;padding:1px 6px;white-space:nowrap">卡网自动进货</span>'
+      : '';
     const stockCell = isPool
-      ? `<span class="stock-badge ${stockLevelClass(stock)}">${stock}</span>`
+      ? `<span class="stock-badge ${(p.source || 'local') === 'shop' ? 'lvl-ok' : stockLevelClass(stock)}">${stock}</span>${shopTag}`
       : '<span class="muted">固定内容</span>';
     const expanded = stockExpanded.has(i);
 
@@ -442,7 +494,7 @@ function renderStock() {
         }
       }
       detail = `
-        <tr class="stock-detail-row"><td colspan="6">
+        <tr class="stock-detail-row"><td colspan="7">
           <div class="stock-detail">
             <div class="sd-block">
               <label>${isPool ? '当前库存卡密（点「已手动发货·移除」扣掉你在别处手动发出的那张）' : '发货内容（只读）'}</label>
@@ -461,12 +513,20 @@ function renderStock() {
         </td></tr>`;
     }
 
+    // 自动发货开关：本品开 且 浮窗总开关开 才会自动发；TG/手动点发货不受影响
+    const autoOn = Number(p.autoDeliver) !== 0;
+    const autoCell = `<label class="auto-toggle" title="本品开 + 总开关开 = 付款后自动发货；关 = 只提醒，TG 按钮或人工发">
+      <input type="checkbox" class="p-auto-stock" data-i="${i}" ${autoOn ? 'checked' : ''}>
+      <span style="color:${autoOn ? '#0a7f4f' : '#999'}">${autoOn ? '开' : '关'}</span>
+    </label>`;
+
     return `
       <tr>
         <td>${name}</td>
         <td>${spec}</td>
         <td>${price}</td>
         <td class="ta-center">${stockCell}</td>
+        <td class="ta-center">${autoCell}</td>
         <td class="ta-center">${sold}</td>
         <td class="ta-right">
           <button class="link-btn sd-toggle" data-i="${i}">${expanded ? '收起' : (isPool ? '查看 / 补货' : '查看')}</button>
@@ -479,7 +539,7 @@ function renderStock() {
       <table class="stock-table">
         <thead><tr>
           <th>商品</th><th>规格</th><th>价格</th>
-          <th class="ta-center">剩余库存</th><th class="ta-center">累计已发</th><th class="ta-right">操作</th>
+          <th class="ta-center">剩余库存</th><th class="ta-center">自动发货</th><th class="ta-center">累计已发</th><th class="ta-right">操作</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -488,6 +548,25 @@ function renderStock() {
   if (summary) {
     summary.innerHTML = `共 <b>${products.length}</b> 个规格 · 库存合计 <b>${totalStock}</b> 个（${poolCount} 个走库存）· 累计已发 <b>${totalSold}</b> 单`;
   }
+
+  // 自动发货开关：改了立即存后端（不用点「保存全部设置」），失败回弹
+  box.querySelectorAll('.p-auto-stock').forEach(cb => cb.addEventListener('change', async () => {
+    const i = Number(cb.dataset.i);
+    const p = products[i];
+    const next = cb.checked ? 1 : 0;
+    const prev = Number(p.autoDeliver) === 0 ? 0 : 1;
+    p.autoDeliver = next;
+    if (backendMode && typeof p.id === 'number') {
+      try {
+        await backend.updateProduct(p.id, productPayload(p));
+      } catch (e) {
+        p.autoDeliver = prev;   // 保存失败回弹，避免界面与数据库不一致
+        alert('保存失败：' + e.message);
+      }
+    }
+    renderStock();
+    renderProds();   // 「商品发货」页的下拉同步
+  }));
 
   box.querySelectorAll('.sd-toggle').forEach(b => b.addEventListener('click', async () => {
     const i = Number(b.dataset.i);
@@ -555,10 +634,7 @@ function renderStock() {
           return;
         }
         try {
-          const r = await backend.createProduct({
-            match: p.match, spec: p.spec, price: p.price,
-            mode: p.mode, delivery: p.delivery, note: p.note
-          });
+          const r = await backend.createProduct(productPayload(p));
           p.id = r.id;
         } catch (e) { alert('建立商品失败：' + e.message); return; }
       }
@@ -649,7 +725,7 @@ $('save').addEventListener('click', async () => {
         }
         deletedProductIds = [];
         for (const p of products) {
-          const payload = { match: p.match, spec: p.spec, price: p.price, mode: p.mode, delivery: p.delivery, note: p.note };
+          const payload = productPayload(p);
           if (typeof p.id === 'number') await backend.updateProduct(p.id, payload);
           else { const r = await backend.createProduct(payload); p.id = r.id; }
         }

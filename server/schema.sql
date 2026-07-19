@@ -76,3 +76,25 @@ CREATE TABLE IF NOT EXISTS deliver_commands (
   updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='远程发货指令队列（飞机→插件）';
+
+-- ── 卡网自动进货（v2 新增；老库由 server.js 启动时自动 ALTER/建表，无需手动执行）──
+-- products 新增列：
+--   source       VARCHAR(16)  NOT NULL DEFAULT 'local'  -- local=本地库存 / shop=卡网自动进货
+--   shop_sku_id  BIGINT NULL                             -- 卡网 SKU ID（source=shop 必填）
+--   max_cost     DECIMAL(10,2) NULL                      -- 单件成本上限，卡网价超过则不自动进货
+CREATE TABLE IF NOT EXISTS shop_purchases (
+  id            BIGINT PRIMARY KEY AUTO_INCREMENT,
+  order_id      VARCHAR(64) NOT NULL UNIQUE COMMENT '闲鱼订单号（一单最多一笔进货）',
+  product_id    BIGINT NOT NULL,
+  shop_sku_id   BIGINT NOT NULL,
+  downstream_no VARCHAR(80) NOT NULL COMMENT '发给卡网的幂等单号（先落库再下单，崩溃重放不重复扣款）',
+  attempt       INT NOT NULL DEFAULT 1,
+  shop_order_id BIGINT NULL,
+  shop_order_no VARCHAR(64) NULL,
+  amount        VARCHAR(32) NULL COMMENT '实际扣款金额（对账用）',
+  status        VARCHAR(16) NOT NULL DEFAULT 'ordering' COMMENT 'ordering/ordered/imported/failed',
+  error         VARCHAR(255) NOT NULL DEFAULT '',
+  created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='卡网自动进货记录';

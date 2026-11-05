@@ -29,8 +29,8 @@ const DEFAULT_SETTINGS = {
   riskKeywords: ['微信', 'vx', 'v信', '威信', 'wx', 'QQ', 'qq', '支付宝', '加我', '私聊', '线下', '直接转', '走咸鱼外', '绕过平台', '别走平台', '出闲鱼', '脱离平台'],
   riskReply: '不好意思哈，为了保障双方权益，我们只在闲鱼平台内交易和沟通哦，其他方式恕不支持~',
 
-  // 转人工：买家消息命中关键词 → 回一句安抚语 + 暂停该会话自动回复，等人工
-  humanHandoffKeywords: ['人工客服', '转人工', '人工', '真人', '客服在吗', '找客服'],
+  // 转人工：整词/短语命中才暂停自动回复。不要用单独的「人工」，否则「是人工发货吗」会误触发。
+  humanHandoffKeywords: ['转人工', '找人工', '人工客服'],
   humanHandoffReply: '好的，稍等一下哈~ 马上由本人为您处理，请耐心等待回复😊',
   humanHandoffCooldownMinutes: 180, // 接管后暂停自动回复的时长（分钟），到期自动恢复
   humanTakeoverMinutes: 10,     // 本人手动回复某会话后，这段时间内机器人不打扰（0=关闭该逻辑）
@@ -81,6 +81,15 @@ chrome.runtime.onInstalled.addListener(async () => {
   // 只动"旧默认值"，不覆盖你手动调过的其它值
   if (!cur.settings || !cur.settings.pollIntervalMs || Number(cur.settings.pollIntervalMs) <= 5000) {
     settings.pollIntervalMs = 60000;
+  }
+  // 转人工关键词：旧默认含单独的「人工」，「是人工发货吗」会被误伤。
+  // 只升级仍停在旧默认列表的配置，不覆盖你改过的词表。
+  const OLD_HANDOFF = ['人工客服', '转人工', '人工', '真人', '客服在吗', '找客服'];
+  const nowKws = cur.settings && cur.settings.humanHandoffKeywords;
+  const sameKwList = (a, b) => Array.isArray(a) && a.length === b.length &&
+    [...a].map(s => String(s).trim()).sort().join('\n') === [...b].map(s => String(s).trim()).sort().join('\n');
+  if (!nowKws || sameKwList(nowKws, OLD_HANDOFF)) {
+    settings.humanHandoffKeywords = DEFAULT_SETTINGS.humanHandoffKeywords.slice();
   }
   await chrome.storage.local.set({
     settings,

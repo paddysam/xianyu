@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "闲鱼智能客服助手",
-  "version": "0.1.0",
+  "version": "1.0.1",
   "description": "闲鱼网页版自动回复 + AI 智能客服 + 付款后自动发货（知识库驱动）",
   "permissions": ["storage", "alarms", "notifications", "tabs", "scripting"],
   "host_permissions": [

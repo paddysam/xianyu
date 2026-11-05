@@ -98,3 +98,16 @@ CREATE TABLE IF NOT EXISTS shop_purchases (
   updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='卡网自动进货记录';
+
+-- 插件「反馈问题」：版本 / UA / 选择器自检 / 脱敏日志 / 描述。单条由接口限制在 64KB 内。
+CREATE TABLE IF NOT EXISTS feedback (
+  id              BIGINT PRIMARY KEY AUTO_INCREMENT,
+  version         VARCHAR(32) NOT NULL DEFAULT '',
+  ua              VARCHAR(400) NOT NULL DEFAULT '',
+  page            VARCHAR(32) NOT NULL DEFAULT '' COMMENT 'popup / options',
+  selector_audit  TEXT,
+  logs            MEDIUMTEXT,
+  description     VARCHAR(4000) NOT NULL,
+  created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='插件问题反馈';

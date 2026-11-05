@@ -34,7 +34,8 @@ DB_USER=root
 DB_PASSWORD=你的MySQL密码
 DB_NAME=xianyu_assistant
 PORT=8788
-AUTH_TOKEN=            # 可选，设了插件里要填一样的值；本机使用一般留空即可
+BIND_HOST=127.0.0.1    # 默认只听本机。改成 0.0.0.0 等对外地址时，AUTH_TOKEN 必填，否则拒绝启动
+AUTH_TOKEN=            # 本机回环可以留空；对外监听必须设置，并在插件里填同一个值
 ```
 
 ## 数据表
@@ -60,8 +61,12 @@ AUTH_TOKEN=            # 可选，设了插件里要填一样的值；本机使�
 | POST | `/api/deliver/rollback` | 聊天发送失败时回滚（恢复卡密、删记录） |
 | GET | `/api/deliveries` | 发货记录（对账） |
 | GET/PUT | `/api/kb` | 知识库读写 |
+| POST | `/api/feedback` | 插件「反馈问题」。正文 ≤64KB；同一 IP 10 分钟最多 5 次。描述必填，入库前脱敏 |
 
 ## 安全说明
 
-- 默认只监听 `127.0.0.1`（本机），不对外网开放。
-- 如需简单鉴权，设 `.env` 的 `AUTH_TOKEN`，插件设置里填相同值即可。
+- **默认只监听 `127.0.0.1`**。`BIND_HOST` 留空时也是这个地址，不会绑到 `0.0.0.0`。
+- **没设 `AUTH_TOKEN` 就想对外监听（例如 `BIND_HOST=0.0.0.0`）时，进程直接拒绝启动**，不会带着空令牌把库存接口暴露出去。本机回环可以不设令牌，日志里会提醒你对外发布前补上。
+- 设了 `AUTH_TOKEN` 之后，除首页、`/privacy`、`/api/health` 外，请求都要带请求头 `X-Auth-Token`。插件设置里填同一个值。
+- **CORS 不会是 `*`**。只反射 `chrome-extension://` 和 `http(s)://127.0.0.1`、`localhost` 的 Origin，其它来源不给跨源许可。
+- `POST /api/feedback` 单条最大 64KB，同一来源 IP 10 分钟最多 5 次。描述、日志在入库前会再做一次脱敏（邮箱、`sk-` 密钥、`密码/卡密/token=` 这类字段）。

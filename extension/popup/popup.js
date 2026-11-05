@@ -4,6 +4,7 @@ async function render() {
   const { settings = {}, stats = {}, logs = [] } =
     await chrome.storage.local.get(['settings', 'stats', 'logs']);
   $('enabled').checked = !!settings.enabled;
+  if (window.__XY_renderSelectorWarn) await window.__XY_renderSelectorWarn();
   $('stReplies').textContent = stats.repliesSent || 0;
   $('stDeliveries').textContent = stats.deliveriesSent || 0;
   $('stAi').textContent = stats.aiCalls || 0;

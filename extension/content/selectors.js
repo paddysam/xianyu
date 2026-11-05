@@ -27,8 +27,15 @@ window.__XY_SELECTORS_DEFAULT = {
   msgTextMine: '[class*="message-text-right--"]',
   msgTips: '[class*="msg-tips--"]',
 
-  // 右侧面板商品标题（当前宝贝 / 订单卡片）
+  // 右侧面板商品标题（当前宝贝 / 订单卡片）。发货前必须能读到，读不到就停止发货。
   productTitle: '[class*="itemName--"]',
+
+  // ===== 可选：会话身份（拿不到时自动退化，不必覆盖）=====
+  // 买家 userId / 会话 id。不要把选择器指到头像 img 上——文件名会串号。
+  convUserId: '[data-userid], [data-user-id], [data-uid], [data-conversation-id], [data-session-id]',
+  // 会话项里的商品标题、订单号，仅在没有 userId 时参与「昵称+标题+订单号」退化键
+  convItemTitle: '[class*="itemName--"], [class*="itemTitle--"], [class*="item-title--"]',
+  convOrderId: '[data-order-id], [data-orderid]',
 
   // ===== 输入区 =====
   inputBox: 'textarea.ant-input',

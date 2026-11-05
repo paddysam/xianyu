@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 
 const SRC = fs.readFileSync(
-  'C:/Users/peter1/Desktop/project/seller/extension/content/content.js', 'utf8');
+  path.join(__dirname, '..', 'extension', 'content', 'content.js'), 'utf8');
 
 /** 按函数名从源码提取完整 function 声明（brace 匹配，跳过字符串/注释粗略版） */
 function extract(name) {
@@ -39,7 +39,7 @@ const sandbox = {
   // 极简 document：只支持 querySelector(inputBox) 返回带 value 的假输入框
   document: { querySelector: (sel) => (sel === 'textarea' ? { value: fakeInputValue } : null) },
 };
-const fnNames = ['matchProduct', 'prepareDelivery', 'consumeCard', 'looksLikeCredential', 'replyDelay', 'buildDeliveryInfo', 'withBotMark', 'isMuted', 'setMuted', 'normNick', 'isMaskedNick', 'nickMatch', 'uniqueNickMatch', 'pickDeliverableOrders', 'userActive', 'noteConvLocateFail'];
+const fnNames = ['matchProduct', 'prepareDelivery', 'consumeCard', 'looksLikeCredential', 'replyDelay', 'buildDeliveryInfo', 'withBotMark', 'isMuted', 'setMuted', 'normNick', 'isMaskedNick', 'nickMatch', 'uniqueNickMatch', 'pickDeliverableOrders', 'userActive', 'noteConvLocateFail', 'isStableConvId', 'fallbackConvKey', 'convKeyOf', 'markAmbiguousConvs', 'readReactConvId', 'readConvStableId', 'normMsgText', 'seenNewOwnMessage', 'matchHandoffKeyword', 'wantsHuman', 'sootheWindowMs', 'sootheRecentlySent', 'panelStatus', 'notifyAtMostEvery', 'notifyStockOnce', 'auditSelectors'];
 const code = fnNames.map(extract).join('\n\n');
 const vm = require('vm');
 vm.createContext(sandbox);
@@ -290,6 +290,121 @@ console.log('\n[C] consumeCard 扣库存');
   // 另一个订单独立计数
   F.noteConvLocateFail({ orderId: 'OD2', buyerNick: '李四', title: 'X' });
   eq('不同订单独立计数（OD2第一次不告警）', notifies.length, 2);
+
+  // ========== L. 会话 key：不用头像文件名，不唯一则标出 ==========
+  console.log('\n[L] 会话 key（userId / 退化键 / 不唯一）');
+  eq('数字 userId 当作稳定 id', F.isStableConvId('1234567890'), true);
+  eq('带点的头像文件名不是稳定 id', F.isStableConvId('O1CN01abcdef.jpg'), false);
+  const avatarFile = 'O1CN01XxYyZzAaBbCcDdEeFfGgHhIiJjKkLlMm.jpg';
+  const oldSlice = avatarFile.split('/').pop().slice(0, 48);
+  ok('旧逻辑截前 48 字符的文件名不会被当成稳定 id', !F.isStableConvId(oldSlice) || oldSlice.indexOf('.') >= 0);
+  eq('文件名截断即使塞进 stableId，带点的也不会变成 id key',
+    F.convKeyOf({ stableId: 'avatar.jpg', name: '甲', productTitle: '货', orderNo: '100' }).indexOf('id:') === 0, false);
+  eq('有 userId → id: 前缀，不看昵称', F.convKeyOf({ stableId: '123456789', name: '张三' }), 'id:123456789');
+  eq('拿不到 id → 昵称+标题+订单号', F.convKeyOf({ name: '张三', productTitle: '会员月卡', orderNo: '10001' }), 'fb:张三|会员月卡|10001');
+  ok('不同订单号不会串成同一个 key',
+    F.convKeyOf({ name: '张三', productTitle: '会员月卡', orderNo: '10001' }) !==
+    F.convKeyOf({ name: '张三', productTitle: '会员月卡', orderNo: '10002' }));
+  eq('三者皆空 → 空 key（调用方不会拿它发货）', F.convKeyOf({}), '');
+  function elWith(opts) {
+    opts = opts || {};
+    return {
+      getAttribute: (n) => (opts.attrs && opts.attrs[n]) || '',
+      querySelectorAll: () => [],
+      querySelector: (sel) => {
+        if (sel === 'img') return { getAttribute: (n) => (n === 'src' ? (opts.src || '') : ''), src: opts.src || '' };
+        if (sel === 'a[href]') return opts.href ? { getAttribute: () => opts.href, href: opts.href } : null;
+        return null;
+      },
+      innerText: opts.text || '',
+      textContent: opts.text || ''
+    };
+  }
+  eq('只有头像文件名 → 读不到 userId', F.readConvStableId(elWith({ src: 'https://img.alicdn.com/imgextra/i1/' + avatarFile })), '');
+  eq('头像查询串里的 userId 可以用', F.readConvStableId(elWith({ src: 'https://img.alicdn.com/avatar.jpg?userId=12345678' })), '12345678');
+  eq('data-userid 优先', F.readConvStableId(elWith({ attrs: { 'data-userid': '99887766' }, src: 'https://x/a.jpg' })), '99887766');
+  const dup = [
+    { key: 'fb:张三|会员|', name: '张三' },
+    { key: 'fb:张三|会员|', name: '张三' },
+    { key: 'id:123456', name: '李四' },
+    { key: 'id:123456', name: '李四' },
+    { key: 'id:654321', name: '王五' },
+    { key: 'id:654321', name: '赵六' }
+  ];
+  F.markAmbiguousConvs(dup);
+  eq('退化键重复 → 不唯一（转人工）', dup[0].ambiguous, true);
+  eq('同一条退化键的另一条也不唯一', dup[1].ambiguous, true);
+  eq('同一稳定 id 且昵称一致 → 当成重复节点，不转人工', dup[2].ambiguous, false);
+  eq('同一稳定 id 但昵称冲突 → 不唯一', dup[4].ambiguous, true);
+
+  // ========== M. 点发送后必须在己方消息里看到文本 ==========
+  console.log('\n[M] seenNewOwnMessage 发送确认');
+  eq('新气泡含正文 → 确认成功', F.seenNewOwnMessage(['旧消息'], ['旧消息', '【自动发货】 #9 卡密'], '【自动发货】 #9\n卡密'), true);
+  eq('列表没变化 → 点了发送也不算成功', F.seenNewOwnMessage(['旧消息'], ['旧消息'], '【自动发货】 #9'), false);
+  eq('发送前已经有同样文本 → 不算本次成功', F.seenNewOwnMessage(['【自动发货】 #9'], ['【自动发货】 #9'], '【自动发货】 #9'), false);
+
+  // ========== N. 转人工整词/短语 + 安抚限频 ==========
+  console.log('\n[N] wantsHuman 整词/短语，安抚限频');
+  sandbox.state.settings = { humanHandoffKeywords: ['转人工', '找人工', '人工客服'], humanHandoffCooldownMinutes: 180 };
+  eq('「是人工发货吗」不触发', F.wantsHuman('是人工发货吗'), false);
+  eq('「我要转人工」触发', F.wantsHuman('我要转人工'), true);
+  eq('「找人工」触发', F.wantsHuman('找人工'), true);
+  eq('「请转人工客服」触发', F.wantsHuman('请转人工客服'), true);
+  eq('空消息不触发', F.wantsHuman(''), false);
+  sandbox.state.settings.humanHandoffKeywords = ['人工'];
+  eq('自定义短词「人工」在「是人工发货吗」里不是整词', F.wantsHuman('是人工发货吗'), false);
+  eq('单独发送「人工」算整词', F.wantsHuman('人工'), true);
+  eq('「人工。」算整词', F.wantsHuman('人工。'), true);
+  sandbox.state.sootheAt = {};
+  sandbox.state.settings.humanHandoffCooldownMinutes = 180;
+  eq('从没发过安抚语 → 可以发', F.sootheRecentlySent('conv1'), false);
+  sandbox.state.sootheAt.conv1 = Date.now() - 31 * 60000;
+  eq('冷却 180 分钟、31 分钟前发过 → 仍限频', F.sootheRecentlySent('conv1'), true);
+  sandbox.state.sootheAt.conv1 = Date.now() - 181 * 60000;
+  eq('超过接管时长 → 可以再发', F.sootheRecentlySent('conv1'), false);
+
+  // ========== O. 面板未加载必须失败 ==========
+  console.log('\n[O] panelStatus 面板未加载 / 不一致');
+  eq('面板标题空 → unloaded', F.panelStatus('', 'HeyGen月卡'), 'unloaded');
+  eq('订单标题空 → unloaded', F.panelStatus('HeyGen月卡', ''), 'unloaded');
+  eq('两边都空 → unloaded', F.panelStatus('', ''), 'unloaded');
+  eq('面板包含订单标题 → ok', F.panelStatus('HeyGen月卡 官方直充', 'HeyGen月卡'), 'ok');
+  eq('互不包含 → mismatch', F.panelStatus('Cursor Pro', 'HeyGen月卡'), 'mismatch');
+
+  // ========== P. 缺货通知 30 分钟一条（含会抄送 TG 的 notify） ==========
+  console.log('\n[P] notifyStockOnce 缺货通知限频');
+  sandbox.state.stockAlertAt = {};
+  notifies.length = 0;
+  eq('同一订单第一次缺货 → 通知', F.notifyStockOnce('ST1', '缺货', '请补货'), true);
+  eq('通知已发出', notifies.length, 1);
+  eq('30 分钟内第二次 → 不再通知', F.notifyStockOnce('ST1', '缺货', '请补货'), false);
+  eq('通知数仍是 1', notifies.length, 1);
+  eq('另一订单不受影响', F.notifyStockOnce('ST2', '缺货', '请补货'), true);
+  sandbox.state.stockAlertAt.ST1 = Date.now() - 31 * 60000;
+  eq('超过 30 分钟 → 可以再通知一次', F.notifyStockOnce('ST1', '缺货', '请补货'), true);
+  eq('此时共 3 条', notifies.length, 3);
+
+  // ========== Q. 选择器启动自检 ==========
+  console.log('\n[Q] auditSelectors');
+  const Sels = {
+    convItem: '.c', convActive: '.a', msgList: '.m', msgTextBuyer: '.b',
+    msgTextMine: '.me', inputBox: 'textarea', sendButtonScope: 'button', productTitle: '.t'
+  };
+  const hitCritical = (sel) => sel === '.c' || sel === 'textarea';
+  eq('关键选择器能命中 → 通过（其余未命中不算 domBroken）', F.auditSelectors(Sels, hitCritical).ok, true);
+  const missingItem = Object.assign({}, Sels, { convItem: '  ' });
+  const miss = F.auditSelectors(missingItem, hitCritical);
+  eq('convItem 为空 → 不通过', miss.ok, false);
+  ok('missing 记下 convItem', miss.missing.indexOf('convItem') >= 0);
+  const none = F.auditSelectors(Sels, () => null);
+  eq('会话列表和输入框都找不到 → domBroken', none.domBroken, true);
+  eq('页面未渲染关键节点 → 不通过', none.ok, false);
+  const bad = F.auditSelectors(Object.assign({}, Sels, { inputBox: '[' }), (sel) => {
+    if (sel === '[') throw new Error('bad selector');
+    return { ok: 1 };
+  });
+  ok('非法选择器记入 invalid', bad.invalid.indexOf('inputBox') >= 0);
+  eq('有非法选择器 → 不通过', bad.ok, false);
 
   console.log('\n===== content.js 逻辑: ' + pass + ' 通过, ' + fail + ' 失败 =====');
   process.exit(fail ? 1 : 0);

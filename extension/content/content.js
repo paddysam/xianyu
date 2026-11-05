@@ -38,8 +38,14 @@
     tgNotified: {},              // orderId -> ts 已推送过 Telegram"新订单"的单（持久化去重，防重复推）
     convLocateFail: {},          // orderId -> 连续"未定位到会话"次数（瞬时失败不告警，连续≥3轮才喊人工）
     manualAlertAt: {},           // orderId -> 上次"需人工"告警时间（同一订单30分钟内不重复喊）
+    stockAlertAt: {},            // orderId -> 上次缺货通知时间（桌面+Telegram，30 分钟一条）
+    panelAlertAt: {},            // orderId -> 上次面板未加载/不一致通知时间
+    deliverHold: {},             // orderId -> {ts, reason} 发送未确认，停止自动重试并转人工
+    sootheAt: {},                // convKey -> ts 转人工安抚语上次发送时间（限频）
     remoteCmdTries: {},          // orderId -> 远程发货指令已尝试次数（瞬时失败重试几轮再判失败）
     humanHandoff: {},            // convKey -> ts 转人工接管中的会话（持久化）
+    lastSendFail: null,          // 'unconfirmed' | 'rejected' | null 最近一次 sendReply 失败原因
+    selectorAudit: null,         // 启动时选择器自检结果（给弹窗告警和反馈）
     replyTimestamps: new Map(), // convKey -> [ts, ...] 用于限频
     deliverBusy: false,          // 发货流程互斥
     activeSig: null,             // 当前激活会话已处理到的消息签名（兜底检查去重用）
@@ -139,9 +145,192 @@
     return null;
   }
 
+  // ---------- 会话身份（禁止用头像文件名当 key）----------
+
+  /**
+   * 稳定的买家 userId / 会话 id：6~64 位字母数字。
+   * 带点的文件名（avatar.jpg）、过短的碎片一律拒绝。
+   */
+  function isStableConvId(v) {
+    const s = String(v == null ? '' : v).trim();
+    if (!/^[A-Za-z0-9_-]{6,64}$/.test(s)) return false;
+    if (!/[A-Za-z0-9]/.test(s)) return false;
+    return true;
+  }
+
+  /** 拿不到 userId 时的退化键：昵称 + 商品标题 + 订单号。三者皆空则返回空串。 */
+  function fallbackConvKey(name, productTitle, orderNo) {
+    const n = normNick(name);
+    const t = normNick(productTitle);
+    const o = normNick(orderNo);
+    if (!n && !t && !o) return '';
+    return 'fb:' + n + '|' + t + '|' + o;
+  }
+
+  /** 会话 key：优先 id:<userId/会话id>，否则 fb:昵称|标题|订单号。不接收头像文件名。 */
+  function convKeyOf(parts) {
+    const p = parts || {};
+    const id = String(p.stableId || '').trim();
+    if (isStableConvId(id)) return 'id:' + id;
+    return fallbackConvKey(p.name, p.productTitle, p.orderNo);
+  }
+
+  /**
+   * 同一 key 出现多次：退化键（或 id 对应了不同昵称）标为不唯一，调用方转人工。
+   * 同一个稳定 id 且昵称不冲突，当成列表重复节点，不误伤。
+   */
+  function markAmbiguousConvs(list) {
+    const groups = Object.create(null);
+    const arr = Array.isArray(list) ? list : [];
+    for (const c of arr) {
+      if (!c) continue;
+      c.ambiguous = false;
+      if (!c.key) continue;
+      if (!groups[c.key]) groups[c.key] = [];
+      groups[c.key].push(c);
+    }
+    for (const key of Object.keys(groups)) {
+      const group = groups[key];
+      if (group.length < 2) continue;
+      const names = Object.create(null);
+      for (const c of group) {
+        const n = normNick(c.name);
+        if (n) names[n] = 1;
+      }
+      if (key.indexOf('id:') === 0 && Object.keys(names).length <= 1) continue;
+      for (const c of group) c.ambiguous = true;
+    }
+    return arr;
+  }
+
+  /** 从 React 节点上浅层找 userId / sessionId / conversationId，步数有上限。 */
+  function readReactConvId(el) {
+    if (!el || typeof el !== 'object') return '';
+    let seed = null;
+    try {
+      const rk = Object.keys(el).find(x =>
+        x.indexOf('__reactProps$') === 0 ||
+        x.indexOf('__reactFiber$') === 0 ||
+        x.indexOf('__reactInternalInstance$') === 0);
+      if (!rk) return '';
+      seed = el[rk];
+    } catch (_) { return ''; }
+    const idKeys = {
+      userid: 1, user_id: 1, buyerid: 1, buyeruserid: 1, peeruserid: 1,
+      sessionid: 1, conversationid: 1, cid: 1, convid: 1
+    };
+    const seen = new Set();
+    const stack = [{ node: seed, depth: 0 }];
+    let steps = 0;
+    while (stack.length && steps < 40) {
+      const cur = stack.pop();
+      steps++;
+      const node = cur && cur.node;
+      const depth = cur ? cur.depth : 0;
+      if (!node || typeof node !== 'object' || seen.has(node) || depth > 6) continue;
+      seen.add(node);
+      let keys;
+      try { keys = Object.keys(node); } catch (_) { continue; }
+      for (const key of keys) {
+        const v = node[key];
+        if (idKeys[String(key).toLowerCase()] && isStableConvId(v)) return String(v).trim();
+        if (depth < 5 && v && typeof v === 'object' &&
+            (key === 'memoizedProps' || key === 'pendingProps' || key === 'props' ||
+             key === 'session' || key === 'conversation' || key === 'user' ||
+             key === 'buyer' || key === 'return' || key === 'child')) {
+          stack.push({ node: v, depth: depth + 1 });
+        }
+      }
+    }
+    return '';
+  }
+
+  /**
+   * 从会话节点读买家 userId / 会话 id。
+   * 只认 data 属性、链接参数、头像 URL 查询串里的 userId、React props。
+   * 不使用头像文件名（包括前 48 字符）——那是串号的来源。
+   */
+  function readConvStableId(el) {
+    if (!el || typeof el.getAttribute !== 'function') return '';
+    const attrNames = [
+      'data-userid', 'data-user-id', 'data-uid', 'data-buyer-id', 'data-buyerid',
+      'data-peer-id', 'data-peerid', 'data-session-id', 'data-sessionid',
+      'data-conversation-id', 'data-conversationid', 'data-cid', 'data-conv-id'
+    ];
+    const nodes = [el];
+    if (typeof el.querySelectorAll === 'function') {
+      try {
+        const extra = state && state.S && state.S.convUserId;
+        const sel = extra || '[data-userid],[data-user-id],[data-uid],[data-buyer-id],[data-session-id],[data-conversation-id],[data-cid],[data-conv-id]';
+        const found = el.querySelectorAll(sel);
+        if (found && found.length) {
+          for (let i = 0; i < found.length; i++) nodes.push(found[i]);
+        }
+      } catch (_) { /* 选择器异常时只看元素自身 */ }
+    }
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      if (!node || typeof node.getAttribute !== 'function') continue;
+      for (let j = 0; j < attrNames.length; j++) {
+        const v = node.getAttribute(attrNames[j]);
+        if (isStableConvId(v)) return String(v).trim();
+      }
+    }
+    let href = '';
+    try {
+      const a = el.querySelector && el.querySelector('a[href]');
+      href = a ? (a.getAttribute('href') || a.href || '') : '';
+    } catch (_) {}
+    const hm = String(href).match(/(?:userId|user_id|sessionId|conversationId)[=/]([A-Za-z0-9_-]{6,64})/i);
+    if (hm && isStableConvId(hm[1])) return hm[1];
+    try {
+      const img = el.querySelector && el.querySelector('img');
+      const src = img ? (img.getAttribute('src') || img.src || '') : '';
+      const qm = String(src).match(/[?&](?:userId|user_id|uid)=([A-Za-z0-9_-]{6,64})/i);
+      if (qm && isStableConvId(qm[1])) return qm[1];
+    } catch (_) {}
+    const rid = readReactConvId(el);
+    if (isStableConvId(rid)) return String(rid).trim();
+    return '';
+  }
+
+  function readConvProductTitle(el) {
+    if (!el || typeof el.querySelector !== 'function') return '';
+    const extra = state && state.S && state.S.convItemTitle;
+    const sel = extra || '[class*="itemName--"], [class*="itemTitle--"], [class*="item-title--"]';
+    try {
+      const n = el.querySelector(sel);
+      return n ? String(n.textContent || '').trim() : '';
+    } catch (_) { return ''; }
+  }
+
+  function readConvOrderNo(el) {
+    if (!el || typeof el.getAttribute !== 'function') return '';
+    const attrNames = ['data-order-id', 'data-orderid', 'data-order-no'];
+    const nodes = [el];
+    try {
+      const extraSel = state && state.S && state.S.convOrderId;
+      if (extraSel && el.querySelector) {
+        const n = el.querySelector(extraSel);
+        if (n) nodes.push(n);
+      }
+    } catch (_) {}
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      if (!node || typeof node.getAttribute !== 'function') continue;
+      for (let j = 0; j < attrNames.length; j++) {
+        const v = String(node.getAttribute(attrNames[j]) || '').trim();
+        if (/^[0-9A-Za-z-]{8,32}$/.test(v)) return v;
+      }
+    }
+    const text = String(el.innerText || el.textContent || '');
+    const m = text.match(/(?:订单号|订单)[:：\s]*([0-9]{10,24})/);
+    return m ? m[1] : '';
+  }
+
   // ---------- 会话列表 ----------
 
-  /** 解析一个会话项 → {el, name, lastMsg, time, orderTag, unread, key} */
+  /** 解析一个会话项 → {el, name, lastMsg, time, orderTag, unread, key, ambiguous} */
   function parseConvItem(el) {
     const S = state.S;
     const orderTagEl = el.querySelector(S.convOrderTag);
@@ -164,18 +353,29 @@
       time = texts[0];
     }
     const unread = !!el.querySelector(S.convUnread);
-    // 会话唯一键：优先用头像 URL（昵称可能未加载），退化到昵称
-    const img = el.querySelector('img');
-    const key = (img && img.src) ? img.src.split('/').pop().slice(0, 48) : name;
-    return { el, name, lastMsg, time, orderTag, unread, key: key || name || lastMsg };
+    // 会话唯一键：买家 userId / 会话 id。拿不到再用「昵称+商品标题+订单号」。
+    // 绝不用头像文件名前 48 字符——默认头像和 CDN 路径前缀会把不同买家串成同一个 key。
+    let stableId = '', productTitle = '', orderNo = '';
+    try {
+      stableId = readConvStableId(el);
+      productTitle = readConvProductTitle(el);
+      orderNo = readConvOrderNo(el);
+    } catch (_) { /* DOM 异常时退回昵称组合键 */ }
+    const key = convKeyOf({ stableId, name, productTitle, orderNo });
+    return {
+      el, name, lastMsg, time, orderTag, unread,
+      productTitle, orderNo, stableId,
+      key, ambiguous: false
+    };
   }
 
   // 官方/系统会话：不是买家，绝不自动处理（它们也会有未读角标）
   const SYSTEM_CONV_NAMES = ['通知消息', '系统消息', '闲鱼小蜜', '闲鱼客服', '互动消息', '官方客服'];
 
   function scanConvList() {
-    return [...document.querySelectorAll(state.S.convItem)].map(parseConvItem)
+    const list = [...document.querySelectorAll(state.S.convItem)].map(parseConvItem)
       .filter(c => c.key && !SYSTEM_CONV_NAMES.includes(c.name));
+    return markAmbiguousConvs(list);
   }
 
   // ---------- 昵称匹配（容忍闲鱼把买家昵称脱敏，如订单里的 "一***啊"）----------
@@ -253,12 +453,34 @@
     return el ? el.textContent.trim() : '';
   }
 
+  function normMsgText(s) {
+    return String(s || '').replace(/\s+/g, '');
+  }
+
   /**
-   * 往输入框写入并发送。
+   * 点击发送之后，是否真的多出一条「己方」气泡且包含本次正文。
+   * 发送前已经在列表里的同一段文本不算本次成功（防止假成功）。
+   */
+  function seenNewOwnMessage(before, after, text) {
+    const head = normMsgText(text).slice(0, 40);
+    if (!head) return false;
+    const prev = (Array.isArray(before) ? before : []).map(normMsgText);
+    const next = (Array.isArray(after) ? after : []).map(normMsgText);
+    return next.some(t => t && t.indexOf(head) >= 0 && prev.indexOf(t) < 0);
+  }
+
+  function currentSellerTexts() {
+    return readMessages().filter(m => m && m.role === 'seller' && m.text).map(m => m.text);
+  }
+
+  /**
+   * 往输入框写入并发送。点了发送按钮不算成功。
+   * 5 秒内己方消息列表出现该文本才返回 true；否则 lastSendFail='unconfirmed'。
    * expectKey：目标会话的 key。发送前校验当前激活会话就是它——
    * 防止（比如你人工同时在操作工作台点开了别的会话时）消息发进别人的聊天窗。
    */
   async function sendReply(text, expectKey) {
+    state.lastSendFail = 'rejected';
     const S = state.S;
     const checkTarget = () => {
       if (!expectKey) return true;
@@ -290,8 +512,19 @@
       const btn = [...document.querySelectorAll(S.sendButtonScope)]
         .find(b => b.textContent.replace(/\s/g, '') === '发送');
       if (!btn || btn.disabled) { log('error', '找不到可用的发送按钮'); return false; }
+      const beforeTexts = currentSellerTexts();
       btn.click();
-      await sleep(500);
+      // 点发送 ≠ 成功。5 秒内己方消息列表必须出现这段文本。
+      const confirmed = await waitFor(() => {
+        if (!checkTarget()) return false;
+        return seenNewOwnMessage(beforeTexts, currentSellerTexts(), text);
+      }, 5000, 200);
+      if (!confirmed) {
+        state.lastSendFail = 'unconfirmed';
+        log('error', '点击发送后 5 秒内未在己方消息列表看到该文本，本次不算发送成功');
+        return false;
+      }
+      state.lastSendFail = null;
       return true;
     } finally {
       // 延后一点再复位，确保由这次点击引发的事件都已被监听器忽略
@@ -471,10 +704,49 @@
 
   // ---------- 回复决策 ----------
 
-  /** 买家消息是否在要求转人工 */
+  /**
+   * 转人工关键词按整词/短语匹配。
+   * 两字及以内（如「人工」）两侧不能再粘着汉字/字母/数字，
+   * 所以「是人工发货吗」不会命中「人工」；三字及以上短语（转人工/找人工/人工客服）允许出现在句子里。
+   */
+  function matchHandoffKeyword(text, kw) {
+    const src = String(text || '');
+    const word = String(kw || '').trim();
+    if (!src || !word) return false;
+    if (Array.from(word).length <= 2) {
+      const esc = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp('(^|[^\\u4e00-\\u9fffA-Za-z0-9])' + esc + '($|[^\\u4e00-\\u9fffA-Za-z0-9])');
+      return re.test(src);
+    }
+    return src.indexOf(word) >= 0;
+  }
+
+  /** 买家消息是否在要求转人工（整词/短语，不是随便包含「人工」两个字） */
   function wantsHuman(text) {
-    const kws = (state.settings.humanHandoffKeywords || []).filter(Boolean);
-    return kws.some(k => text.includes(k));
+    const src = String(text || '');
+    const kws = (state.settings.humanHandoffKeywords || [])
+      .map(k => String(k || '').trim()).filter(Boolean);
+    return kws.some(k => matchHandoffKeyword(src, k));
+  }
+
+  /** 安抚语限频窗口：接管时长，且至少 30 分钟 */
+  function sootheWindowMs() {
+    const mins = Number(state.settings && state.settings.humanHandoffCooldownMinutes);
+    const win = (Number.isFinite(mins) && mins > 0 ? mins : 30) * 60000;
+    return Math.max(win, 30 * 60000);
+  }
+
+  function sootheRecentlySent(key) {
+    if (!key) return false;
+    const last = (state.sootheAt && state.sootheAt[key]) || 0;
+    return Date.now() - last < sootheWindowMs();
+  }
+
+  async function markSootheSent(key) {
+    if (!key) return;
+    if (!state.sootheAt) state.sootheAt = {};
+    state.sootheAt[key] = Date.now();
+    try { await chrome.storage.local.set({ sootheAt: state.sootheAt }); } catch (_) {}
   }
 
   /** 买家是否在试图引流/线下交易（加微信、支付宝直转等），命中要防风控 */
@@ -619,14 +891,98 @@
   }
 
   /**
-   * 发货前交叉校验：右侧面板显示的商品标题应与订单商品一致。
-   * 防止两个买家昵称显示相同（如都叫 x***5）时定位到错误会话。
-   * 只有两者都非空且互不包含才判定不一致（面板没加载出来不拦截）。
+   * 右侧商品面板与订单标题的关系：
+   *   unloaded  面板还没加载（或订单标题为空）——必须失败停止，不能盲发
+   *   mismatch  两边都有字且互不包含——疑似串会话
+   *   ok        互相包含，可以继续
    */
-  function panelTitleMismatch(orderTitle) {
-    const panelTitle = currentProductTitle();
-    if (!panelTitle || !orderTitle) return false;
-    return !panelTitle.includes(orderTitle) && !orderTitle.includes(panelTitle);
+  function panelStatus(panelTitle, orderTitle) {
+    const p = String(panelTitle || '').trim();
+    const o = String(orderTitle || '').trim();
+    if (!p || !o) return 'unloaded';
+    if (p.indexOf(o) >= 0 || o.indexOf(p) >= 0) return 'ok';
+    return 'mismatch';
+  }
+
+  /** 打开会话后等面板标题出现，最多 4 秒，然后给出 panelStatus。 */
+  async function resolvePanelStatus(orderTitle) {
+    await waitFor(() => currentProductTitle(), 4000, 200);
+    return panelStatus(currentProductTitle(), orderTitle);
+  }
+
+  /**
+   * 同一订单的某类通知最多每 30 分钟 1 条（桌面通知会同时抄送 Telegram）。
+   * mapName 是 state 上的持久化字典名，例如 stockAlertAt。
+   */
+  function notifyAtMostEvery(mapName, orderId, title, message, windowMs) {
+    if (!state[mapName] || typeof state[mapName] !== 'object') state[mapName] = {};
+    const id = String(orderId || '');
+    const last = id ? (state[mapName][id] || 0) : 0;
+    const win = windowMs || 30 * 60000;
+    if (id && Date.now() - last < win) return false;
+    if (id) state[mapName][id] = Date.now();
+    notify(title, message);
+    try {
+      const patch = {};
+      patch[mapName] = state[mapName];
+      chrome.storage.local.set(patch);
+    } catch (_) {}
+    return true;
+  }
+
+  /** 缺货：同一订单 30 分钟内桌面通知和 Telegram 合计最多 1 条。 */
+  function notifyStockOnce(orderId, title, message) {
+    return notifyAtMostEvery('stockAlertAt', orderId, title, message, 30 * 60000);
+  }
+
+  /** 面板未加载或标题对不上：记日志、限频通知，并让调用方停止本次发货。 */
+  function stopForPanel(order, skuLabel, status) {
+    if (status === 'unloaded') {
+      log('warn', `订单 ${order.orderId}「${skuLabel}」右侧商品面板未加载，本次发货失败并停止（不扣卡密、不标发货）`);
+      notifyAtMostEvery('panelAlertAt', order.orderId,
+        '⚠️ 发货已停止',
+        `订单 ${order.orderId} 右侧商品面板没加载出来，已停止发货。请打开该会话确认商品后再发。`);
+      return true;
+    }
+    if (status === 'mismatch') {
+      log('warn', `订单 ${order.orderId}「${skuLabel}」：会话「${order.buyerNick}」右侧商品与订单不一致，疑似同昵称撞车，请人工发货`);
+      notifyAtMostEvery('panelAlertAt', order.orderId,
+        '⚠️ 有单需人工发货',
+        `买家「${order.buyerNick}」会话与订单商品不一致，「${skuLabel}」请手动核对发货`);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * 点击发送后 5 秒没看到己方消息：不标发货、转人工、通知，并停掉这单的自动重试。
+   * rolledBack：后端模式回滚是否成功。false 表示卡可能还扣着，通知里改口让人核对库存。
+   * 本地模式在确认成功前不会扣卡，不传这个参数。
+   */
+  async function onSendUnconfirmed(order, conv, rolledBack) {
+    if (!state.deliverHold) state.deliverHold = {};
+    state.deliverHold[order.orderId] = { ts: Date.now(), reason: 'send-unconfirmed' };
+    try { await chrome.storage.local.set({ deliverHold: state.deliverHold }); } catch (_) {}
+    if (conv && conv.key) {
+      try { await setHandoff(conv.key); } catch (_) {}
+    }
+    const stockLine = rolledBack === false
+      ? '库存回滚失败，请立刻核对这张卡还在不在、买家有没有已经收到。'
+      : '未扣卡密、未标发货。';
+    log('error', `订单 ${order.orderId} 发送未确认，${stockLine}已转人工`);
+    notify('⚠️ 发货未确认，已转人工',
+      `订单 ${order.orderId} 点击发送后 5 秒内未看到己方消息，${stockLine}请核对与「${order.buyerNick}」的会话；若消息其实已发出，请把该卡标为已用，避免重复发卡。`);
+  }
+
+  /** 会话 key 不唯一：停止自动发货并转人工，同一订单 30 分钟内只通知一次。 */
+  async function noteAmbiguousConv(order, conv) {
+    log('warn', `订单 ${order.orderId} 买家「${order.buyerNick}」会话标识不唯一，停止自动发货并转人工`);
+    if (conv && conv.key) {
+      try { await setHandoff(conv.key); } catch (_) {}
+    }
+    notifyAtMostEvery('panelAlertAt', 'amb:' + order.orderId,
+      '⚠️ 会话无法唯一识别，已转人工',
+      `买家「${order.buyerNick}」有会话对不上唯一身份（缺少 userId，昵称/商品/订单号也不唯一）。订单 ${order.orderId} 已停止自动发货，请人工核对。`);
   }
 
   /** 后端模式的去重缓存也持久化，避免插件重载后重复打开已发货会话做无用功 */
@@ -763,6 +1119,11 @@
         await backend.resolveDeliverCommand(oid, 'done', '（已发过，未重复）').catch(() => {});
         continue;
       }
+      if (state.deliverHold && state.deliverHold[oid]) {
+        delete state.remoteCmdTries[oid];
+        await backend.resolveDeliverCommand(oid, 'failed', '发送未确认，已转人工，请核对聊天后手动发').catch(() => {});
+        continue;
+      }
       const order = byId[oid];
       if (!order) {
         // 本账号查无此单 ≠ 失败：两个号共用后端时，这可能是另一个号的单，
@@ -878,6 +1239,10 @@
    * 调用前应已确认：状态待发货、未退款、未在 deliveredOrders 里。
    */
   async function deliverOrder(order, force = false) {
+    if (order && state.deliverHold && state.deliverHold[order.orderId]) {
+      log('info', `订单 ${order.orderId} 此前发送未确认，已转人工，不再自动重试`);
+      return;
+    }
     const skuLabel = order.title + (order.spec ? ' / ' + order.spec : '') +
       (order.price ? ' ¥' + order.price : '');
     const doneMark = state.settings.deliveryDoneMark || '【自动发货】';
@@ -892,18 +1257,19 @@
   async function deliverViaBackend(order, skuLabel, doneMark, force = false) {
     // 先定位会话；找不到就不占用库存（瞬时失败下轮重试，连续失败才告警）
     const conv = await openConversationByNick(order.buyerNick);
-    if (!conv) { noteConvLocateFail(order); return; }
+    if (!conv || conv.ambiguous) {
+      if (conv && conv.ambiguous) await noteAmbiguousConv(order, conv);
+      else noteConvLocateFail(order);
+      return;
+    }
     delete state.convLocateFail[order.orderId];   // 定位成功，清失败计数
     try {
       // 注意：这里不再用"聊天里出现过发货标记"做去重——回头客的聊天里必然留着
       // 上一单的标记，会把新订单误判成已发货。去重完全交给后端（orderId 唯一约束，
       // 重复调用幂等返回 alreadyDelivered，不会重复扣卡）。
-      // 交叉校验：会话右侧的商品和订单商品明显不一致 → 可能是同昵称撞车，转人工
-      if (panelTitleMismatch(order.title)) {
-        log('warn', `订单 ${order.orderId}「${skuLabel}」：会话「${order.buyerNick}」右侧商品与订单不一致，疑似同昵称撞车，请人工发货`);
-        notify('⚠️ 有单需人工发货', `买家「${order.buyerNick}」会话与订单商品不一致，「${skuLabel}」请手动核对发货`);
-        return;
-      }
+      // 面板没加载 / 标题对不上：失败停止，此时还没向后端扣卡密。
+      const panel = await resolvePanelStatus(order.title);
+      if (stopForPanel(order, skuLabel, panel)) return;
 
       let r;
       try {
@@ -930,13 +1296,20 @@
               (r.stockLeft <= 2 ? '（⚠️ 该补货了）\n\n💡 直接回复本机器人即可远程补货：\n补货 新版\n卡密1\n卡密2' : ''));
             await autoConsign(order, skuLabel); // 点亮订单发货，闭环
           } else {
-            // 聊天发送失败 → 回滚数据库，恢复卡密，下轮重试
+            // 聊天发送未确认 → 回滚数据库，恢复卡密。未确认则转人工并不再自动重试。
+            let rolled = false;
             try {
               await backend.rollbackDeliver(order.orderId);
-              log('warn', `订单 ${order.orderId} 聊天发送失败，已回滚库存，下轮重试`);
+              rolled = true;
             } catch (e) {
               log('error', `订单 ${order.orderId} 发送失败且回滚失败，请手动核对该单是否已发！${e.message}`);
               notify('⚠️ 发货异常需核对', `订单 ${order.orderId} 发送失败且回滚失败，请手动检查库存与该订单`);
+            }
+            if (state.lastSendFail === 'unconfirmed') {
+              // 回滚失败也要停住，避免下一轮再发一张
+              await onSendUnconfirmed(order, conv, rolled);
+            } else if (rolled) {
+              log('warn', `订单 ${order.orderId} 聊天发送失败，已回滚库存，下轮重试`);
             }
           }
           break;
@@ -958,10 +1331,14 @@
           // 本函数对未发货订单每轮都会重试，货到自动发出，这里只记日志不打扰
           log('info', `订单 ${order.orderId}「${skuLabel}」本地无货，正在从卡网自动进货，到货后自动发出`);
           break;
-        case 'outOfStock':
-          log('warn', `订单 ${order.orderId}「${skuLabel}」待发货，但数据库无可用库存，等待人工发货`);
-          notify('⚠️ 有单待发货但缺货', `「${skuLabel}」库存不足，买家 ${order.buyerNick} 已付款，请补货或手动发货`);
+        case 'outOfStock': {
+          const sent = notifyStockOnce(order.orderId, '⚠️ 有单待发货但缺货',
+            `「${skuLabel}」库存不足，买家 ${order.buyerNick} 已付款，请补货或手动发货`);
+          log(sent ? 'warn' : 'info', sent
+            ? `订单 ${order.orderId}「${skuLabel}」待发货，但数据库无可用库存，等待人工发货`
+            : `订单 ${order.orderId} 仍缺货，30 分钟内已通知过（含 Telegram），本次不再推送`);
           break;
+        }
         case 'needManual':
           log('warn', `订单 ${order.orderId}「${skuLabel}」待发货，但没有匹配该规格/价格的规则，请人工发货`);
           notify('⚠️ 有单需人工发货', `「${skuLabel}」未配置对应规格的发货规则，请手动发货`);
@@ -994,12 +1371,19 @@
     }
     const prepared = prepareDelivery(rule);
     if (!prepared) {
-      log('warn', `订单 ${order.orderId}「${skuLabel}」待发货，但无可用库存，等待人工发货`);
-      notify('⚠️ 有单待发货但缺货', `「${skuLabel}」库存不足，买家 ${order.buyerNick} 已付款，请尽快补货或手动发货`);
+      const sent = notifyStockOnce(order.orderId, '⚠️ 有单待发货但缺货',
+        `「${skuLabel}」库存不足，买家 ${order.buyerNick} 已付款，请尽快补货或手动发货`);
+      log(sent ? 'warn' : 'info', sent
+        ? `订单 ${order.orderId}「${skuLabel}」待发货，但无可用库存，等待人工发货`
+        : `订单 ${order.orderId} 仍缺货，30 分钟内已通知过（含 Telegram），本次不再推送`);
       return;
     }
     const conv = await openConversationByNick(order.buyerNick);
-    if (!conv) { noteConvLocateFail(order); return; }
+    if (!conv || conv.ambiguous) {
+      if (conv && conv.ambiguous) await noteAmbiguousConv(order, conv);
+      else noteConvLocateFail(order);
+      return;
+    }
     delete state.convLocateFail[order.orderId];   // 定位成功，清失败计数
     try {
       // 缓存丢失（重装插件等）后的兜底去重：只认"发货标记 + 本订单号"同时出现。
@@ -1009,12 +1393,9 @@
         await markOrderDelivered(order, null);
         return;
       }
-      // 交叉校验：会话右侧的商品和订单商品明显不一致 → 可能是同昵称撞车，转人工
-      if (panelTitleMismatch(order.title)) {
-        log('warn', `订单 ${order.orderId}「${skuLabel}」：会话「${order.buyerNick}」右侧商品与订单不一致，疑似同昵称撞车，请人工发货`);
-        notify('⚠️ 有单需人工发货', `买家「${order.buyerNick}」会话与订单商品不一致，「${skuLabel}」请手动核对发货`);
-        return;
-      }
+      // 面板没加载 / 标题对不上：失败停止。本地模式此时还没扣卡密。
+      const panel = await resolvePanelStatus(order.title);
+      if (stopForPanel(order, skuLabel, panel)) return;
       await sleep(replyDelay());
       if (await sendReply(doneMark + ' #' + order.orderId + '\n' + prepared.content, conv.key)) {
         if (prepared.card) await consumeCard(rule, prepared.card);
@@ -1025,6 +1406,9 @@
         tgPush(`✅ 已自动发货\n买家：${order.buyerNick}\n商品：${skuLabel}` +
           (prepared.card ? `\n剩余库存：${rule.cards.length}${rule.cards.length <= 2 ? '（⚠️ 该补货了）' : ''}` : ''));
         await autoConsign(order, skuLabel); // 点亮订单发货，闭环
+      } else if (state.lastSendFail === 'unconfirmed') {
+        // 未扣库存（consumeCard 在发送确认之后）。转人工，不再自动重试。
+        await onSendUnconfirmed(order, conv);
       } else {
         log('error', `订单 ${order.orderId} 发送失败，未扣库存，下轮重试`);
       }
@@ -1070,6 +1454,12 @@
       }
     }
     if (!conv) { await clearConvSearch(); return null; }  // 失败：清搜索恢复列表
+    // 退化键不唯一（或同一个 id 对上了不同昵称）→ 不点开、不发货，交给人工
+    if (conv.ambiguous || !conv.key) {
+      log('warn', `买家「${nick}」命中的会话标识不唯一，停止自动处理并转人工`);
+      await clearConvSearch();
+      return { ambiguous: true, key: conv.key || '', name: conv.name || nick };
+    }
     conv.el.click();
     // 必须等到"激活的正是目标会话"，防止点击失效时消息发进别人的聊天窗
     const ok = await waitFor(() => {
@@ -1114,6 +1504,16 @@
     // ---- 免打扰名单最高优先：你手动设了"此用户不用机器人" → 连会话都不点开，一句不回 ----
     if (isMuted(conv.key)) {
       state.baseline.set(conv.key, conv.lastMsg);
+      return;
+    }
+    // 标识不唯一：不点开、不自动回复，转人工（30 分钟内不重复通知）
+    if (conv.ambiguous) {
+      state.baseline.set(conv.key, conv.lastMsg);
+      log('warn', `会话「${conv.name || conv.key}」标识不唯一，已停止自动回复并转人工`);
+      notifyAtMostEvery('panelAlertAt', 'ambconv:' + conv.key,
+        '🙋 会话无法唯一识别，已转人工',
+        `「${conv.name || '未知买家'}」与其他会话撞了同一个标识，已停止自动回复和发货，请人工处理`);
+      try { await setHandoff(conv.key); } catch (_) {}
       return;
     }
     conv.el.click();
@@ -1169,16 +1569,24 @@
       return;
     }
 
-    // ---- 转人工：买家要求人工客服 → 安抚一句 + 暂停该会话自动回复 ----
+    // ---- 转人工：买家要求人工客服 → 安抚一句（限频）+ 暂停该会话自动回复 ----
     if (wantsHuman(lastChat.text)) {
       if (!handoffActive(conv.key)) {
-        // 首次命中：发安抚语（转人工语不加机器人标识，避免矛盾）
-        const soothe = state.settings.humanHandoffReply;
-        await sleep(replyDelay());
-        if (soothe) await sendReply(soothe, conv.key);
+        const soothe = (state.settings.humanHandoffReply || '').trim();
+        const limited = sootheRecentlySent(conv.key);
+        if (!limited) {
+          // 安抚语不加机器人标识，避免和「转人工」矛盾；同一窗口内只发一次
+          if (soothe) {
+            await sleep(replyDelay());
+            await sendReply(soothe, conv.key);
+          }
+          await markSootheSent(conv.key);
+          notify('🙋 有买家要人工客服', `「${conv.name}」请求人工，已暂停自动回复，请尽快处理`);
+          log('info', `「${conv.name}」触发转人工，已暂停自动回复，等待人工处理`);
+        } else {
+          log('info', `「${conv.name}」转人工安抚语还在限频窗口内，本次不再发送`);
+        }
         await setHandoff(conv.key);
-        notify('🙋 有买家要人工客服', `「${conv.name}」请求人工，已让其稍候，请尽快回复`);
-        log('info', `「${conv.name}」触发转人工，已暂停自动回复，等待人工处理`);
       }
       state.baseline.set(conv.key, conv.lastMsg);
       return;
@@ -1245,11 +1653,21 @@
 
   // ---------- 主循环 ----------
 
+  /** 单个节点解析不出「是否撞车」，对照整表补上 ambiguous。 */
+  function flagIfAmbiguous(conv) {
+    if (!conv || !conv.key) return conv;
+    try {
+      const same = scanConvList().filter(c => c.key === conv.key);
+      if (same.some(c => c.ambiguous)) conv.ambiguous = true;
+    } catch (_) {}
+    return conv;
+  }
+
   /** 当前激活会话的消息签名（会话key + 消息数 + 最后一条内容） */
   function activeConvSig() {
     const act = document.querySelector(state.S.convActive);
     if (!act) return null;
-    const conv = parseConvItem(act);
+    const conv = flagIfAmbiguous(parseConvItem(act));
     if (!conv.key || SYSTEM_CONV_NAMES.includes(conv.name)) return null;
     const msgs = readMessages();
     const last = msgs[msgs.length - 1];
@@ -1375,7 +1793,11 @@
   // ---------- 启动 / 停止 ----------
 
   async function loadConfig() {
-    const data = await chrome.storage.local.get(['settings', 'kb', 'products', 'deliveredOrders', 'humanHandoff', 'humanReplyAt', 'botMuted', 'humanQA', 'tgNotified']);
+    const data = await chrome.storage.local.get([
+      'settings', 'kb', 'products', 'deliveredOrders', 'humanHandoff',
+      'humanReplyAt', 'botMuted', 'humanQA', 'tgNotified',
+      'deliverHold', 'sootheAt', 'stockAlertAt', 'panelAlertAt'
+    ]);
     state.settings = data.settings || {};
     state.kb = data.kb || { entries: [], knowledgeText: '' };
     state.products = data.products || [];
@@ -1384,6 +1806,10 @@
     state.humanReplyAt = data.humanReplyAt || {};
     state.botMuted = data.botMuted || {};
     state.tgNotified = data.tgNotified || {};
+    state.deliverHold = data.deliverHold || {};
+    state.sootheAt = data.sootheAt || {};
+    state.stockAlertAt = data.stockAlertAt || {};
+    state.panelAlertAt = data.panelAlertAt || {};
     state.humanQA = data.humanQA || [];
     state.S = window.__XY_MERGE_SELECTORS(state.settings.selectorOverrides);
 
@@ -1401,6 +1827,67 @@
       } catch (e) {
         log('warn', '从后端读话术库失败，暂用本地缓存: ' + (e && e.message));
       }
+    }
+  }
+
+  /**
+   * 启动自检：必填选择器缺失/写错，或页面上会话列表和输入框都找不到。
+   * 结果写入 storage，弹窗据此告警，反馈问题时一并带上。
+   */
+  function auditSelectors(S, query) {
+    const required = ['convItem', 'convActive', 'msgList', 'msgTextBuyer', 'msgTextMine', 'inputBox', 'sendButtonScope', 'productTitle'];
+    const missing = [];
+    const invalid = [];
+    const unmatched = [];
+    const q = typeof query === 'function' ? query : function () { return true; };
+    for (let i = 0; i < required.length; i++) {
+      const k = required[i];
+      const sel = S && S[k];
+      if (typeof sel !== 'string' || !String(sel).trim()) { missing.push(k); continue; }
+      try {
+        if (!q(sel)) unmatched.push(k);
+      } catch (_) {
+        invalid.push(k);
+      }
+    }
+    const domBroken = ['convItem', 'inputBox'].every(function (k) {
+      return missing.indexOf(k) >= 0 || invalid.indexOf(k) >= 0 || unmatched.indexOf(k) >= 0;
+    });
+    return {
+      ok: missing.length === 0 && invalid.length === 0 && !domBroken,
+      missing: missing,
+      invalid: invalid,
+      unmatched: unmatched,
+      domBroken: domBroken
+    };
+  }
+
+  async function runSelectorAudit() {
+    const S = state.S;
+    if (!S) return;
+    const ask = function (sel) { return document.querySelector(sel); };
+    let report = null;
+    // 骨架屏时会话列表和输入框可能都还没有。配置错误立刻报；只是页面没画出来就再等几轮。
+    for (let i = 0; i < 4; i++) {
+      await sleep(i === 0 ? 1200 : 3000);
+      report = auditSelectors(S, ask);
+      if (!report) break;
+      if (report.ok || report.missing.length || report.invalid.length) break;
+    }
+    let version = '';
+    try { version = chrome.runtime.getManifest().version; } catch (_) {}
+    report.version = version;
+    report.ts = Date.now();
+    state.selectorAudit = report;
+    try { await chrome.storage.local.set({ selectorAudit: report }); } catch (_) {}
+    if (!report.ok) {
+      const why = report.missing.length ? ('缺少选择器 ' + report.missing.join('、'))
+        : report.invalid.length ? ('选择器写错了 ' + report.invalid.join('、'))
+        : '页面上找不到会话列表或输入框，选择器可能已失效';
+      log('error', '选择器自检未通过：' + why);
+      notify('⚠️ 选择器自检未通过', why + '。自动回复/发货可能失效，请打开插件弹窗查看或点「反馈问题」。');
+    } else {
+      log('info', '选择器自检通过');
     }
   }
 
@@ -1810,6 +2297,8 @@
         else alert(
           '发货未完成，可能原因：\n' +
           '· 输入框有草稿 / 会话被切走 → 发送被安全拦截，库存已自动回滚，处理后再点一次即可\n' +
+          '· 点击发送后 5 秒内没在聊天里看到己方消息 → 不算发货成功，未扣卡密，已转人工\n' +
+          '· 右侧商品面板没加载出来 → 本次发货已停止，确认面板商品后再发\n' +
           '· 库存缺货 / 没匹配的发货规则 → 需补货或人工发\n' +
           '具体哪一种，点插件图标看「运行日志」最后几条。');
       } finally {
@@ -1860,6 +2349,7 @@
                         location.hash.includes('im'), 30000, 500);
     await loadConfig();
     mountBadge();
+    runSelectorAudit(); // 不阻塞主循环；缺选择器会记到 storage，弹窗告警
     // 聊天页两个按钮随你切换会话实时刷新（都独立于助手开关）：
     //   · 免打扰按钮：反映当前会话是否已停用机器人
     //   · 手动发货按钮：给当前会话买家发货（点击时才做权威订单核对+去重）

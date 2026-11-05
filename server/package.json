@@ -1,6 +1,6 @@
 {
   "name": "xianyu-assistant-server",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "闲鱼智能客服助手 本地后端（MySQL）：卡密库存、发货记录、知识库/商品规则",
   "main": "server.js",
   "type": "commonjs",

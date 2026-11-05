@@ -7,7 +7,7 @@
  *   - 发货：原子事务（去重 + 匹配规则 + 锁卡扣减 + 记录），保证不重发、不发错、并发安全
  *   - 知识库：关键词条目 + 店铺知识文本
  *
- * 只监听本机，供你自己的插件调用。启动：node server.js
+ * 默认只监听 127.0.0.1。未设置 AUTH_TOKEN 时拒绝对外监听。启动：node server.js
  */
 const express = require('express');
 const cors = require('cors');
@@ -17,17 +17,99 @@ const shop = require('./shop-client');   // 卡网自动进货（.env 配齐 SHO
 
 const path = require('path');
 const app = express();
-app.use(cors());                       // 允许插件跨源调用
 app.use(express.json({ limit: '2mb' }));
 
 const AUTH_TOKEN = (process.env.AUTH_TOKEN || '').trim();
 const PORT = Number(process.env.PORT || 8788);
 
+/** 本机回环地址。只有这些地址允许在不设 AUTH_TOKEN 时启动。 */
+function isLoopbackHost(host) {
+  const h = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return h === '127.0.0.1' || h === 'localhost' || h === '::1';
+}
+
+/**
+ * 决定监听地址。默认 127.0.0.1。
+ * 未设置 AUTH_TOKEN 且要绑非回环地址 → 拒绝启动。
+ */
+function decideBind(bindRaw, tokenRaw) {
+  const bind = String(bindRaw == null ? '' : bindRaw).trim() || '127.0.0.1';
+  const token = String(tokenRaw == null ? '' : tokenRaw).trim();
+  if (!token && !isLoopbackHost(bind)) {
+    return {
+      ok: false, bind, token,
+      error: '未设置 AUTH_TOKEN，拒绝对外监听（BIND_HOST=' + bind + '）'
+    };
+  }
+  return { ok: true, bind, token };
+}
+
+/** CORS 只放行扩展页面和本机页面，绝不使用 *。 */
+function isCorsOriginAllowed(origin) {
+  if (!origin) return true;
+  if (origin === '*') return false;
+  try {
+    const u = new URL(origin);
+    if (u.protocol === 'chrome-extension:') return true;
+    const host = u.hostname;
+    if ((u.protocol === 'http:' || u.protocol === 'https:') &&
+        (host === '127.0.0.1' || host === 'localhost' || host === '::1')) return true;
+  } catch (_) { /* 非法 Origin 拒绝 */ }
+  return false;
+}
+
+app.use(cors({
+  origin(origin, callback) {
+    // 回写具体 Origin 字符串。不要传 true / '*'，否则 cors 包可能写成 Access-Control-Allow-Origin: *
+    if (!origin || !isCorsOriginAllowed(origin)) return callback(null, false);
+    callback(null, origin);
+  }
+}));
+
+function feedbackByteLength(body) {
+  try { return Buffer.byteLength(JSON.stringify(body == null ? {} : body), 'utf8'); }
+  catch (_) { return Infinity; }
+}
+
+function feedbackWithinLimit(body, max) {
+  return feedbackByteLength(body) <= (max || 64 * 1024);
+}
+
+/** 纯函数限频：窗口内已达上限则拒绝，并返回更新后的时间戳列表。 */
+function allowFeedbackRate(hits, now, windowMs, limit) {
+  const list = (Array.isArray(hits) ? hits : []).filter(t => now - t < windowMs);
+  if (list.length >= limit) return { ok: false, hits: list };
+  list.push(now);
+  return { ok: true, hits: list };
+}
+
+function redactFeedbackField(s, maxLen) {
+  let out = String(s == null ? '' : s);
+  out = out.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]');
+  out = out.replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[secret]');
+  out = out.replace(/(密码|卡密|token|api[_-]?key|secret|AUTH_TOKEN)\s*[:：=]\s*\S+/gi, '$1:[redacted]');
+  if (maxLen && out.length > maxLen) out = out.slice(0, maxLen);
+  return out;
+}
+
+const feedbackRateBuckets = new Map();
+function takeFeedbackSlot(ip) {
+  const now = Date.now();
+  const prev = feedbackRateBuckets.get(ip) || [];
+  const decision = allowFeedbackRate(prev, now, 10 * 60 * 1000, 5);
+  feedbackRateBuckets.set(ip, decision.hits);
+  if (feedbackRateBuckets.size > 2000) {
+    const first = feedbackRateBuckets.keys().next().value;
+    feedbackRateBuckets.delete(first);
+  }
+  return decision.ok;
+}
+
 // 公开页面（无需鉴权）——放在鉴权中间件之前
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));          // 产品介绍首页
 app.get('/privacy', (req, res) => res.sendFile(path.join(__dirname, 'privacy.html'))); // 隐私政策（商店要求）
 
-// 简单令牌校验（AUTH_TOKEN 为空则跳过）
+// 简单令牌校验。AUTH_TOKEN 为空时只可能发生在本机回环（对外监听已在启动时拒绝）。
 app.use((req, res, next) => {
   if (req.path === '/' || req.path === '/api/health' || req.path === '/privacy') return next();
   if (!AUTH_TOKEN) return next();
@@ -46,6 +128,38 @@ app.get('/api/health', wrap(async (req, res) => {
   let db = 'ok';
   try { await pool.query('SELECT 1'); } catch (e) { db = 'down: ' + e.message; }
   res.json({ ok: true, service: 'xianyu-assistant-server', db });
+}));
+
+// ---------- 问题反馈（插件弹窗/设置页）----------
+// 单条 ≤64KB；同一 IP 10 分钟最多 5 次。描述必填。入库前再脱敏一次。
+app.post('/api/feedback', (req, res, next) => {
+  const len = Number(req.headers['content-length'] || 0);
+  if (Number.isFinite(len) && len > 64 * 1024) {
+    return res.status(413).json({ ok: false, error: '反馈内容超过 64KB' });
+  }
+  next();
+}, wrap(async (req, res) => {
+  const body = req.body || {};
+  if (!feedbackWithinLimit(body, 64 * 1024)) {
+    return res.status(413).json({ ok: false, error: '反馈内容超过 64KB' });
+  }
+  const description = redactFeedbackField(body.description, 4000).trim();
+  if (!description) return res.status(400).json({ ok: false, error: '请填写问题描述' });
+  const ip = String((req.socket && req.socket.remoteAddress) || req.ip || 'unknown');
+  if (!takeFeedbackSlot(ip)) {
+    return res.status(429).json({ ok: false, error: '反馈过于频繁，请 10 分钟后再试' });
+  }
+  const version = redactFeedbackField(body.version, 32);
+  const ua = redactFeedbackField(body.ua, 400);
+  const page = redactFeedbackField(body.page, 32);
+  let audit = '';
+  let logs = '';
+  try { audit = redactFeedbackField(JSON.stringify(body.selectorAudit || null), 8000); } catch (_) { audit = ''; }
+  try { logs = redactFeedbackField(JSON.stringify(body.logs || []), 50000); } catch (_) { logs = '[]'; }
+  const [r] = await pool.query(
+    `INSERT INTO feedback (version, ua, page, selector_audit, logs, description) VALUES (?,?,?,?,?,?)`,
+    [version, ua, page, audit, logs, description]);
+  res.json({ ok: true, id: r.insertId });
 }));
 
 // ---------- 商品规则 ----------
@@ -847,15 +961,36 @@ async function ensureDeliverCommandsTable() {
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 }
 
-// 部署到远程服务器供本地浏览器插件访问时绑 0.0.0.0；只在本机用可设为 127.0.0.1
-const BIND = process.env.BIND_HOST || '0.0.0.0';
+async function ensureFeedbackTable() {
+  await pool.query(`CREATE TABLE IF NOT EXISTS feedback (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    version VARCHAR(32) NOT NULL DEFAULT '',
+    ua VARCHAR(400) NOT NULL DEFAULT '',
+    page VARCHAR(32) NOT NULL DEFAULT '',
+    selector_audit TEXT,
+    logs MEDIUMTEXT,
+    description VARCHAR(4000) NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_created (created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='插件问题反馈'`);
+}
+
+// 默认只听 127.0.0.1。未设 AUTH_TOKEN 时禁止对外监听，直接拒绝启动。
+const bindDecision = decideBind(process.env.BIND_HOST, AUTH_TOKEN);
+if (!bindDecision.ok) {
+  console.error('拒绝启动：' + bindDecision.error);
+  console.error('请在 .env 设置 AUTH_TOKEN，或把 BIND_HOST 留空 / 设为 127.0.0.1。');
+  process.exit(1);
+}
+const BIND = bindDecision.bind;
 app.listen(PORT, BIND, async () => {
   console.log(`✓ 闲鱼助手后端已启动: http://${BIND}:${PORT}`);
   console.log(`  健康检查: /api/health`);
   try { await ensureDeliverCommandsTable(); } catch (e) { console.error('建表 deliver_commands 失败:', e.message); }
   try { await ensureShopSourceSchema(); } catch (e) { console.error('卡网进货表结构自愈失败:', e.message); }
-  if (BIND !== '127.0.0.1' && !AUTH_TOKEN) {
-    console.log('  ⚠️ 已对外监听但未设置 AUTH_TOKEN，强烈建议在 .env 设置访问令牌！');
+  try { await ensureFeedbackTable(); } catch (e) { console.error('建表 feedback 失败:', e.message); }
+  if (!AUTH_TOKEN) {
+    console.log('  ⚠️ 未设置 AUTH_TOKEN，当前仅本机回环可访问。对外发布前务必设置令牌。');
   }
   if (shop.enabled()) {
     setInterval(shopPurchasePoller, 20 * 1000);   // 兜底轮询：发货请求没等到的进货单由它接手

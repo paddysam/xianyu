@@ -4,10 +4,11 @@
  */
 'use strict';
 const fs = require('fs');
+const path = require('path');
 const vm = require('vm');
 
 const SRC = fs.readFileSync(
-  'C:/Users/peter1/Desktop/project/seller/extension/background.js', 'utf8');
+  path.join(__dirname, '..', 'extension', 'background.js'), 'utf8');
 
 // ---------- mock chrome ----------
 const store = {

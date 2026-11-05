@@ -185,6 +185,17 @@ label.check input:focus-visible + .toggle { box-shadow: var(--ring); }
 }
 .btn.secondary:hover { background: var(--bg); border-color: var(--text-muted); }
 .add-btn { width: 100%; border-style: dashed; color: var(--text-secondary); }
+.selector-warn {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  background: #fff7ed;
+  color: #9a3412;
+  border: 1px solid #fed7aa;
+  border-radius: var(--radius-sm);
+  font-size: .8125rem;
+  line-height: 1.5;
+}
+.selector-warn[hidden] { display: none; }
 .inline-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .divider { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
 .p-cards-hint {

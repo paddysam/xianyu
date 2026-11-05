@@ -21,6 +21,7 @@
     </div>
     <div class="topbar-actions">
       <span id="saveResult" role="status"></span>
+      <button id="openFeedback" class="btn secondary" type="button" data-page="options">反馈问题</button>
       <button id="save" class="btn primary">保存全部设置</button>
     </div>
   </div>
@@ -56,6 +57,7 @@
   </nav>
 
   <main class="content">
+    <div id="selectorWarn" class="selector-warn" hidden></div>
 
     <!-- AI 接口 -->
     <section id="tab-api" class="panel active">
@@ -183,10 +185,10 @@
           <input id="riskReply">
         </label>
         <hr class="divider">
-        <label>转人工关键词（买家消息含任意一个即转人工，逗号分隔）
-          <input id="humanHandoffKeywords">
+        <label>转人工关键词（整词/短语，逗号分隔。默认：转人工、找人工、人工客服。「是人工发货吗」不会触发）
+          <input id="humanHandoffKeywords" placeholder="转人工,找人工,人工客服">
         </label>
-        <label>转人工安抚语（命中后自动回这句让买家等候；留空则只暂停不回话）
+        <label>转人工安抚语（命中后自动回这句；同一会话在接管时长内最多发一次，且至少间隔 30 分钟。留空则只暂停不回话）
           <input id="humanHandoffReply">
         </label>
         <label>人工接管时长（分钟，期间该会话不自动回复，到期自动恢复）
@@ -303,6 +305,7 @@
 </div>
 
 <script src="../backend-client.js"></script>
+<script src="../feedback.js"></script>
 <script src="options.js"></script>
 </body>
 </html>

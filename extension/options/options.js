@@ -59,6 +59,7 @@ async function load() {
 
   deliveredOrders = dOrders;
   backendMode = backend.enabled();
+  if (window.__XY_renderSelectorWarn) await window.__XY_renderSelectorWarn();
 
   if (backendMode) {
     // 后端模式：规则 + 知识库从数据库读
